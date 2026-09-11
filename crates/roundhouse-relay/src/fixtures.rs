@@ -51,6 +51,11 @@ pub fn usage(input: u64, cached: u64, output: u64) -> Usage {
     Usage {
         input_tokens: input,
         cached_input_tokens: cached,
+        // Not a parameter: no relay fixture asserts on a cache write today, and
+        // a fourth positional count on a helper this widely called would make
+        // every existing call site read as a claim about a number none of them
+        // is about. A test that needs one writes the field.
+        cache_write_tokens: 0,
         output_tokens: output,
         reasoning_tokens: 0,
         accounting: Accounting::Reported,
@@ -181,6 +186,7 @@ impl Log {
         });
         self.push(SessionEventKind::ResponseCompleted {
             provider_reported_cost_usd: None,
+            stop_reason: None,
             response_id: response,
             usage: u,
         })
@@ -280,6 +286,7 @@ impl Log {
         self.push(SessionEventKind::ItemAppended { item: call });
         self.push(SessionEventKind::ResponseCompleted {
             provider_reported_cost_usd: None,
+            stop_reason: None,
             response_id: response,
             usage: usage(1_000, 0, 40),
         })
@@ -321,6 +328,7 @@ impl Log {
         });
         self.push(SessionEventKind::ResponseCompleted {
             provider_reported_cost_usd: None,
+            stop_reason: None,
             response_id: response,
             usage: usage(2_000, 1_000, 20),
         })

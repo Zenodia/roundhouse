@@ -236,6 +236,16 @@ impl Basis {
 /// Clamping it at zero, or "repairing" it here, would hide the only evidence
 /// of the two genuine failures this number exists to surface.
 ///
+/// **The list is three long because a fourth cause was closed rather than
+/// documented.** Until M11.0 review finding F2, `measured_usd` priced a
+/// *summed* `Usage` while `committed_usd` accrued one turn at a time, and
+/// `ProviderPricing::price` had stopped being additive over such a sum — so a
+/// project whose traffic mixed measured and unmeasured cache writes drifted
+/// permanently, with nothing held, no failed settle and no restart. The metrics
+/// rollup now accumulates each turn's own pricing decision
+/// (`routing::PooledUsage`), which makes the three causes above exhaustive by
+/// construction instead of by assertion.
+///
 /// `seat_tokens` is the dollar-free column: traffic served under a forwarded
 /// subscription seat is measured in tokens and priced nowhere, because the seat
 /// is a subscription and this deployment has no per-token figure it may
@@ -395,7 +405,7 @@ pub(super) async fn budget_view(
     // read under have to come from one compiled plane, and two calls would be two
     // lock acquisitions with a write free to land between them — a member with a
     // live key resolving to no admission, reported here as a row with no figures.
-    let (plane, view) = state.directory.snapshot(at_ms);
+    let (plane, view) = state.directory.snapshot(at_ms).await;
     let record = find_project(&view, &project)?;
     let archived = record.is_archived();
 

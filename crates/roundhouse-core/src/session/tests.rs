@@ -126,7 +126,7 @@ async fn replaying_a_completed_turn_id_does_not_generate_twice() {
         .unwrap();
     let response_id = first.response_id().clone();
     session
-        .complete(&response_id, "hi there", Usage::default(), None)
+        .complete(&response_id, Some("hi there"), Usage::default(), None, None)
         .await
         .unwrap();
 
@@ -209,7 +209,7 @@ async fn the_settlement_projection_names_the_last_terminal_event_and_where_it_we
         ..Usage::default()
     };
     session
-        .complete(&first_id, "hi", billed.clone(), None)
+        .complete(&first_id, Some("hi"), billed.clone(), None, None)
         .await
         .unwrap();
 
@@ -439,7 +439,13 @@ async fn a_successor_node_reconstructs_identical_state_from_the_log() {
         .await
         .unwrap();
     session
-        .complete(&response_id, "part one and two", Usage::default(), None)
+        .complete(
+            &response_id,
+            Some("part one and two"),
+            Usage::default(),
+            None,
+            None,
+        )
         .await
         .unwrap();
 
@@ -488,7 +494,7 @@ async fn the_frontier_window_is_a_projection_a_successor_reconstructs() {
         // still spent its ration: the window is folded from `Routed`.
         if turn != 3 {
             session
-                .complete(&response_id, "a", Usage::default(), None)
+                .complete(&response_id, Some("a"), Usage::default(), None, None)
                 .await
                 .unwrap();
         }
@@ -950,7 +956,13 @@ async fn a_completed_item_carries_the_response_stamp_and_a_steer_looks_like_any_
         .unwrap();
     let ordinary_id = admission.response_id().clone();
     session
-        .complete(&ordinary_id, "an ordinary answer", Usage::default(), None)
+        .complete(
+            &ordinary_id,
+            Some("an ordinary answer"),
+            Usage::default(),
+            None,
+            None,
+        )
         .await
         .unwrap();
     let ordinary = session.state().items.last().expect("committed").clone();
@@ -1056,7 +1068,7 @@ async fn routed_turn(session: &mut Session<MemoryStore>, turn: &str, tokens: u64
     };
     let billed = usage.total();
     session
-        .complete(&response_id, "done", usage, None)
+        .complete(&response_id, Some("done"), usage, None, None)
         .await
         .unwrap();
     billed
@@ -1194,11 +1206,12 @@ async fn the_trigger_reads_projections_of_the_log_and_not_counters_beside_it() {
     session
         .complete(
             &response_id,
-            "done",
+            Some("done"),
             Usage {
                 input_tokens: 100,
                 ..Usage::default()
             },
+            None,
             None,
         )
         .await
@@ -1480,11 +1493,12 @@ async fn only_the_turn_an_escalation_was_decided_on_reads_as_its_first() {
     session
         .complete(
             &response_id,
-            "done",
+            Some("done"),
             Usage {
                 input_tokens: 100,
                 ..Usage::default()
             },
+            None,
             None,
         )
         .await
@@ -1579,7 +1593,7 @@ async fn the_turn_after_a_steer_is_the_one_that_fulfils_it_and_only_that_turn() 
         .expect("t2 is open")
         .clone();
     session
-        .complete(&response_id, "done", Usage::default(), None)
+        .complete(&response_id, Some("done"), Usage::default(), None, None)
         .await
         .unwrap();
 
@@ -1703,8 +1717,9 @@ async fn a_shadow_arms_steer_suppresses_nothing() {
     session
         .complete(
             &response_id,
-            "the turn ran unchanged",
+            Some("the turn ran unchanged"),
             Usage::default(),
+            None,
             None,
         )
         .await
@@ -1896,4 +1911,106 @@ async fn a_completing_interjections_own_tokens_reach_neither_trigger_projection(
         session.state().recent_turn_tokens(),
         &[conversation, conversation_again]
     );
+}
+
+/// **A turn's leading configuration run replaces the session's, at the head.**
+///
+/// The M11.1 review's F7 ruling as the fold sees it. A client that rebuilt one
+/// line of its system prompt — the date rolled over, the branch changed, a beta
+/// dropped out of the header — resends a different leading run, and what the
+/// session must then hold is *one* system prompt, the new one, in front of a
+/// conversation that is otherwise untouched. Two copies with the stale one
+/// first is a prompt nobody wrote, and it is what a plain append gives.
+///
+/// The second turn is the one that matters. It appends the replacement *after*
+/// two turns of history, so a fold that pushed would leave the new run in the
+/// middle of the conversation; the assertion is that it is at the front and the
+/// old one is gone.
+#[test]
+fn a_turns_leading_configuration_run_replaces_the_sessions_at_the_head() {
+    fn configuration(text: &str) -> Item {
+        Item {
+            role: Role::Developer,
+            content: ItemContent::Text { text: text.into() },
+            response_id: None,
+        }
+    }
+
+    let mut items = Vec::new();
+    let mut cursor = ConfigurationCursor::default();
+
+    cursor.turn_started();
+    for item in [
+        configuration("header"),
+        configuration("prompt v1"),
+        Item::user_text("hello"),
+    ] {
+        cursor.append(&mut items, item);
+    }
+    cursor.append(
+        &mut items,
+        Item::assistant_text("hi", ResponseId::new("r1")),
+    );
+    assert_eq!(cursor.len(), 2);
+
+    cursor.turn_started();
+    for item in [
+        configuration("header"),
+        configuration("prompt v2"),
+        Item::user_text("again"),
+    ] {
+        cursor.append(&mut items, item);
+    }
+
+    assert_eq!(
+        items
+            .iter()
+            .map(|item| (item.role, item.content.render()))
+            .collect::<Vec<_>>(),
+        vec![
+            (Role::Developer, "header".to_string()),
+            (Role::Developer, "prompt v2".to_string()),
+            (Role::User, "hello".to_string()),
+            (Role::Assistant, "hi".to_string()),
+            (Role::User, "again".to_string()),
+        ],
+        "one system prompt, the current one, ahead of an untouched conversation"
+    );
+    assert_eq!(cursor.len(), 2);
+
+    // Two consecutive configuration-only turns — a client retrying with a
+    // rewritten prompt and nothing new to say — must replace rather than
+    // accumulate. Without the per-turn reset the second run has no way to know
+    // it is a new one, and the session ends up holding both.
+    cursor.turn_started();
+    cursor.append(&mut items, configuration("header"));
+    cursor.append(&mut items, configuration("prompt v3"));
+    cursor.turn_started();
+    cursor.append(&mut items, configuration("header"));
+    cursor.append(&mut items, configuration("prompt v4"));
+    assert_eq!(
+        items
+            .iter()
+            .map(|item| (item.role, item.content.render()))
+            .collect::<Vec<_>>(),
+        vec![
+            (Role::Developer, "header".to_string()),
+            (Role::Developer, "prompt v4".to_string()),
+            (Role::User, "hello".to_string()),
+            (Role::Assistant, "hi".to_string()),
+            (Role::User, "again".to_string()),
+        ],
+    );
+
+    // An interior system item is history: it is not `Developer`, so it never
+    // enters the run, and a configuration item that follows it opens a fresh
+    // one rather than extending the old.
+    cursor.turn_started();
+    cursor.append(&mut items, Item::system_text("a reminder"));
+    assert_eq!(
+        items.last().map(|item| (item.role, item.content.render())),
+        Some((Role::System, "a reminder".to_string())),
+        "appended as history, at the end, not lifted to the head"
+    );
+    assert_eq!(cursor.len(), 2, "and it did not join the configuration run");
 }

@@ -507,10 +507,17 @@ fn tool_calls(turn: &TurnRecord) -> Vec<AtifToolCall> {
     turn.output
         .iter()
         .filter_map(|item| match &item.content {
+            // `namespace` is not published, and that is a schema question
+            // rather than an oversight: ATIF's `AtifToolCall` is Relay's
+            // vocabulary, it has no field for an MCP server, and inventing one
+            // — or folding it into `function_name` — would put a roundhouse
+            // spelling into a format another project owns. Named here so the
+            // loss is visible if Relay ever grows the field (M17).
             roundhouse_core::item::ItemContent::ToolCall {
                 call_id,
                 name,
                 arguments,
+                namespace: _,
             } => Some(AtifToolCall {
                 tool_call_id: call_id.clone(),
                 function_name: name.clone(),
@@ -1028,6 +1035,61 @@ mod tests {
                 .iter()
                 .any(|step| step.message == json!("3 matches")),
             "a tool result must not appear as a spoken step"
+        );
+    }
+
+    /// F6: `tool_calls` discards `namespace` on purpose (atif.rs:516-523), but
+    /// no fixture in this module ever builds a namespaced call, so folding the
+    /// namespace into `function_name` would pass the whole suite. `Log` has no
+    /// namespaced equivalent of `tool_call_turn`, so this test assembles the
+    /// turn by hand from `Item::namespaced_tool_call`.
+    #[test]
+    fn a_namespaced_call_keeps_the_namespace_out_of_function_name() {
+        use roundhouse_core::event::SessionEventKind;
+        use roundhouse_core::ids::{ResponseId, TurnId};
+        use roundhouse_core::item::Item;
+
+        let mut log = Log::new("s1");
+        log.created(None);
+        let response = ResponseId::new("r1");
+        log.push(SessionEventKind::TurnStarted {
+            turn_id: TurnId::new("t1"),
+            response_id: response.clone(),
+        });
+        log.push(SessionEventKind::ItemAppended {
+            item: Item::user_text("ask t1"),
+        });
+        log.push(SessionEventKind::Routed {
+            response_id: response.clone(),
+            decision: fixtures::decision(fixtures::frontier("anthropic", "claude"), Vec::new()),
+        });
+        let call = Item {
+            response_id: Some(response.clone()),
+            ..Item::namespaced_tool_call("call_1", "status", Some("mcp__roundhouse".into()), "{}")
+        };
+        log.push(SessionEventKind::ItemAppended { item: call });
+        log.push(SessionEventKind::ResponseCompleted {
+            provider_reported_cost_usd: None,
+            stop_reason: None,
+            response_id: response,
+            usage: fixtures::usage(1_000, 0, 40),
+        });
+
+        let traj = trajectory(log.events());
+        let calling = traj
+            .steps
+            .iter()
+            .find(|step| step.tool_calls.is_some())
+            .expect("the step that made the call");
+        let calls = calling.tool_calls.as_ref().unwrap();
+        assert_eq!(
+            calls[0].function_name, "status",
+            "the namespace must not be folded into the function name"
+        );
+        let rendered = serde_json::to_value(&calls[0]).unwrap();
+        assert!(
+            rendered.get("namespace").is_none(),
+            "ATIF's AtifToolCall has no namespace field to publish it in: {rendered}"
         );
     }
 

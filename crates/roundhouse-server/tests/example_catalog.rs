@@ -67,6 +67,55 @@ fn the_examples_declared_correlary_prices_a_local_turn() {
     }
 }
 
+/// **The example's second OpenRouter definition authenticates the way that
+/// route actually requires** (F4, M11.0 thermo-nuclear review).
+///
+/// The file is where the spelling of a stored key is now stated, so the file is
+/// where it can now be stated wrong — and wrong here is a 401 on every turn,
+/// which an operator reads as a bad key rather than as a bad line. That is
+/// exactly the class of mistake this example exists to not teach.
+///
+/// The `anthropic` definition beside it is the control: it must stay on the
+/// default. If both providers ended up on one spelling, whichever one it was,
+/// the other would be unreachable — which is the finding this pins the fix of.
+#[test]
+fn the_examples_two_messages_providers_spell_their_keys_differently() {
+    use roundhouse_fleet::WireProtocol;
+    use roundhouse_fleet::anthropic_messages::StoredAuthStyle;
+
+    let config = CatalogConfig::load(example_path()).unwrap();
+    let openrouter = config
+        .providers
+        .get("openrouter-messages")
+        .expect("the example demonstrates the `anthropic_messages` dialect's second provider");
+    assert_eq!(
+        openrouter.auth.stored_auth_style(),
+        Some(StoredAuthStyle::Bearer),
+        "OpenRouter's /messages route answers an `x-api-key` with \"Missing \
+         Authentication header\" on every attempt"
+    );
+    // The style is only reachable by a client that has a route to send, so the
+    // two halves are asserted together: a definition carrying one without the
+    // other teaches a shape that cannot dispatch.
+    assert_eq!(
+        openrouter
+            .routes
+            .for_dialect(WireProtocol::AnthropicMessages),
+        Some("/messages")
+    );
+
+    let anthropic = config
+        .providers
+        .get("anthropic")
+        .expect("the example's first-party Messages provider");
+    assert_eq!(
+        anthropic.auth.stored_auth_style(),
+        Some(StoredAuthStyle::XApiKey),
+        "api.anthropic.com authenticates a bare `x-api-key` and answers a bearer \
+         with a 401 whose message does not say why"
+    );
+}
+
 fn example_path() -> std::path::PathBuf {
     // From the crate root up to the workspace root.
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/catalog.example.json")
@@ -111,15 +160,35 @@ fn the_shipped_example_catalog_parses_and_validates() {
 /// distinguish "a placeholder" from "a real id shown for illustration", and a
 /// full id's `provider/model` slash is what tells the two apart without
 /// hard-coding a provider name here.
+///
+/// **All four rates, not just input (M11.0).** The file gained an
+/// `anthropic_messages` entry, and that is the first dialect on which
+/// `cache_write_per_mtok_usd` is a distinct published price rather than an unused
+/// field — so it is the first entry where a "helpfully" filled-in rate card could
+/// rot in a column this test was not looking at. Checking one of four was enough
+/// while three of them were structurally zero everywhere; it is not any more.
 #[test]
 fn the_example_prices_are_placeholders_not_a_rate_card() {
     let config = CatalogConfig::load(example_path()).unwrap();
     for spec in &config.models {
-        assert_eq!(
-            spec.pricing.input_per_mtok_usd, 0.0,
-            "`{}/{}` carries a non-zero price; the example must not ship a rate card",
-            spec.provider, spec.model
-        );
+        for (field, rate) in [
+            ("input_per_mtok_usd", spec.pricing.input_per_mtok_usd),
+            (
+                "cached_input_per_mtok_usd",
+                spec.pricing.cached_input_per_mtok_usd,
+            ),
+            (
+                "cache_write_per_mtok_usd",
+                spec.pricing.cache_write_per_mtok_usd,
+            ),
+            ("output_per_mtok_usd", spec.pricing.output_per_mtok_usd),
+        ] {
+            assert_eq!(
+                rate, 0.0,
+                "`{}/{}` carries a non-zero `{field}`; the example must not ship a rate card",
+                spec.provider, spec.model
+            );
+        }
         let is_a_real_pinned_id_shown_for_illustration = spec.model.contains('/');
         assert!(
             spec.model.contains("REPLACE") || is_a_real_pinned_id_shown_for_illustration,

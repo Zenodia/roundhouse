@@ -40,18 +40,18 @@ use roundhouse_core::metrics::{
     MetricsConfig, MetricsFold, MetricsSnapshot, ModelKey, Scope, ShadowPricing,
 };
 use roundhouse_core::routing::{
-    AffinityPolicy, AttemptClass, CacheModel, DecisionSource, PickerMode, ProviderPricing,
-    StagePolicy, Target, TierRecipe,
+    AffinityPolicy, AttemptClass, DecisionSource, PickerMode, ProviderPricing, StagePolicy, Target,
+    TierRecipe,
 };
 use roundhouse_core::store::{MemoryStore, SessionStore};
 use roundhouse_fleet::{
     FrontierChunk, FrontierClient, FrontierClients, FrontierError, FrontierModelSpec,
     FrontierQuote, FrontierStream, StaticFrontierCatalog, WireProtocol,
 };
+use roundhouse_server::test_support::frontier_spec;
 use roundhouse_server::{Admission, EchoLocalExecutor, Engine, EngineConfig, LocalExecutor};
 
 mod common;
-use common::MINUTE;
 
 // ---------------------------------------------------------------------------
 // The fleet: three hosted models on three providers, and scripted transports
@@ -68,16 +68,16 @@ fn target(provider: &str) -> Target {
     }
 }
 
+/// [`frontier_spec`] (M15, H2): the same eight-field literal H2 named ten
+/// other copies of, with `provider` and `quality_prior` the two arguments
+/// this file's own tier-selection tests actually vary.
 fn spec(provider: &str, quality_prior: f64) -> FrontierModelSpec {
     FrontierModelSpec {
-        provider: provider.into(),
-        model: "m".into(),
-        wire_protocol: WireProtocol::OpenAiResponses,
-        cache_model: CacheModel::Deterministic { ttl_ms: 5 * MINUTE },
-        pricing: ProviderPricing::free(),
         quality_prior,
+        pricing: ProviderPricing::free(),
         base_ttft_ms: 1.0,
         ttft_ms_per_uncached_token: 0.0,
+        ..frontier_spec(provider, "m", WireProtocol::OpenAiResponses)
     }
 }
 
@@ -1513,6 +1513,11 @@ async fn the_declared_baseline_is_recorded_and_changes_no_route() {
             TurnInput {
                 items: ask(),
                 declared_baseline: Some(format!("{THRIFTY}/m")),
+                // Nothing else declared: this test is about the baseline.
+                output_token_cap: None,
+                tools: None,
+                tool_choice: None,
+                tools_dialect: None,
             },
             &admission_with(PickerMode::CapableFirst),
         )
@@ -1543,6 +1548,11 @@ async fn the_declared_baseline_is_recorded_and_changes_no_route() {
             TurnInput {
                 items: ask(),
                 declared_baseline: Some("a-model-nobody-serves".into()),
+                // Nothing else declared: this test is about the baseline.
+                output_token_cap: None,
+                tools: None,
+                tool_choice: None,
+                tools_dialect: None,
             },
             &admission_with(PickerMode::CapableFirst),
         )
