@@ -611,6 +611,8 @@ fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
 /// access, and it buys back the guarantee that both halves of an admission
 /// come from the same lookup of the same key, at the *one* type the resolver
 /// produces.
+// Keep turn admission inline to avoid an allocation on each key lookup.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum KeyScope {
     /// Pays for turns as one membership, under one policy.
@@ -1189,6 +1191,8 @@ pub enum MembershipError {
 /// policy from another" is not a mistake this crate's callers can make.
 #[derive(Debug, Clone)]
 pub struct Admission {
+    /// Kept with the turn so policy narrowing cannot replace client identity.
+    pub request_context: Option<Arc<crate::request_context::RequestContext>>,
     pub principal: Principal,
     pub policy: Arc<TurnPolicy>,
     /// This membership's fully resolved budget ceilings — its project's
@@ -1295,6 +1299,7 @@ impl Admission {
     /// thing turning it on must not do.
     pub fn open() -> Self {
         Self {
+            request_context: None,
             principal: Principal::default_open(),
             policy: Arc::new(TurnPolicy::unrestricted()),
             budget: None,
@@ -1351,6 +1356,7 @@ impl Admission {
     /// turn rather than cloned again at each read.
     pub fn with_policy(&self, policy: TurnPolicy) -> Self {
         Self {
+            request_context: self.request_context.clone(),
             principal: self.principal.clone(),
             policy: Arc::new(policy),
             budget: self.budget.clone(),

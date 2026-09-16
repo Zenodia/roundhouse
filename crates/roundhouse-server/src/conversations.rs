@@ -205,6 +205,7 @@ pub struct Conversations {
     /// The session each principal most recently drove a turn on. Node-local by
     /// contract — see the module doc.
     latest: Mutex<HashMap<Principal, SessionId>>,
+    contexts: Mutex<HashMap<String, (String, Option<String>)>>,
 }
 
 /// One key's entry in this node's memo of the generation map.
@@ -323,6 +324,7 @@ impl Conversations {
             generations: Mutex::new(GenerationMemo::default()),
             generation_write_failing: AtomicBool::new(false),
             latest: Mutex::new(HashMap::new()),
+            contexts: Mutex::new(HashMap::new()),
         }
     }
 
@@ -574,6 +576,41 @@ impl Conversations {
     /// The last session this principal drove a turn on, on this node.
     pub fn latest(&self, principal: &Principal) -> Option<SessionId> {
         self.lock_latest().get(principal).cloned()
+    }
+
+    /// Compare requests within a namespaced thread. These observations are
+    /// node-local; the generation binding is shared. A restart loses this baseline.
+    pub(crate) fn observe_context(
+        &self,
+        key: &str,
+        context: &crate::request_context::RequestContext,
+        history_rewritten: bool,
+    ) -> &'static str {
+        let previous = self
+            .contexts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(
+                key.to_owned(),
+                (
+                    context.prefix_fingerprint.clone(),
+                    context.window_id.clone(),
+                ),
+            );
+        match previous {
+            Some((_, Some(window)))
+                if context
+                    .window_id
+                    .as_ref()
+                    .is_some_and(|current| current != &window) =>
+            {
+                "window_changed"
+            }
+            Some((prefix, _)) if prefix != context.prefix_fingerprint => "prefix_changed",
+            _ if history_rewritten => "history_rewritten",
+            Some(_) => "prefix_unchanged",
+            None => "first_seen",
+        }
     }
 
     /// Remember that `session` emitted the tool call `call_id`, for `principal`.

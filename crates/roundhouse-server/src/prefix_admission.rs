@@ -14,7 +14,7 @@
 //! warm prefix.
 //!
 //! The two dialects resolve a *different name* for the conversation —
-//! [`responses_api`](crate::responses_api) reads `prompt_cache_key`,
+//! [`responses_api`](crate::responses_api) reads thread/session headers or an explicit cache key,
 //! [`messages_api`](crate::messages_api) a header or `metadata.user_id` — and
 //! then ask exactly this question of it. A second copy would have been a
 //! second answer to "does the client's history still agree with ours", and the
@@ -172,6 +172,8 @@ const MAX_PREFIX_PROBES: u32 = 8;
 /// dialects share and not what distinguishes them** — see the module doc for
 /// what the shared answer is and why it is searched for rather than assumed.
 ///
+/// The returned flag reports a fresh generation opened after a prefix disagreement. Resuming an existing generation or moving past a busy slot alone is not a rewrite.
+///
 /// The client's key is namespaced by [`ControlPlane::qualify`] rather than by a
 /// convention spelled here, because the id this mints is the id the native
 /// surface's namespace check will later be asked about: minting and checking
@@ -187,7 +189,7 @@ pub(crate) async fn bind_prefix<S, T>(
     principal: &Principal,
     cache_key: &str,
     claimed: Vec<Item>,
-) -> Result<(SessionId, Vec<Item>), ApiError>
+) -> Result<(SessionId, Vec<Item>, bool), ApiError>
 where
     S: SessionStore,
     T: Tokenizer + Clone + Send + Sync + 'static,
@@ -222,6 +224,7 @@ where
         Search::Lands { generation, delta } => Ok((
             conversations.commit(principal, &key, generation).await,
             delta,
+            false,
         )),
         // The claim opens a generation of its own and is taken whole: there is
         // nothing recorded there to disagree with. The honest cost, paid once
@@ -231,9 +234,12 @@ where
         // the conservative direction: a ledger claiming a warm prefix for a
         // conversation that just changed shape would be claiming a cache hit
         // nobody can serve.
-        Search::Fresh { generation } => {
+        Search::Fresh {
+            generation,
+            history_rewritten,
+        } => {
             let session_id = open_fresh(engine, conversations, principal, &key, generation).await?;
-            Ok((session_id, claimed))
+            Ok((session_id, claimed, history_rewritten))
         }
         // Every generation a search from a fresh hint could reach disagreed
         // or was busy, and it never found a free slot. Refuse loudly, naming
@@ -259,7 +265,10 @@ enum Search {
     Lands { generation: u32, delta: Vec<Item> },
     /// Nothing agreed, and `generation` is the key's first free slot — not yet
     /// created, since a probe that asked about it left it as it found it.
-    Fresh { generation: u32 },
+    Fresh {
+        generation: u32,
+        history_rewritten: bool,
+    },
     /// Every generation both walks reached was either disagreeing or busy,
     /// and neither walk reached a free slot. `disagreed` and `busy` are what
     /// the walks actually read rather than what they were allowed to read —
@@ -311,6 +320,7 @@ async fn search<S: SessionStore>(
         Probe::Fresh => {
             return Ok(Search::Fresh {
                 generation: current,
+                history_rewritten: false,
             });
         }
         Probe::Disagrees => disagreed += 1,
@@ -393,7 +403,10 @@ async fn search<S: SessionStore>(
     }
 
     if let Some(generation) = fresh {
-        return Ok(Search::Fresh { generation });
+        return Ok(Search::Fresh {
+            generation,
+            history_rewritten: disagreed > 0,
+        });
     }
 
     Ok(Search::Exhausted { disagreed, busy })

@@ -8,18 +8,12 @@
 //! engine: the handler records the session's sequence number, spawns the turn,
 //! and tails the log exactly as that transport does.
 //!
-//! Two properties of this API decide everything else here. A client re-sends the
-//! *whole* conversation on every turn — `previous_response_id` is a websocket
-//! feature, so an HTTP client has nowhere to keep a cursor — and it names the
-//! conversation with `prompt_cache_key`, which is its own session id. (A
-//! configured deployment resolves that name inside the caller's namespace
-//! rather than taking it verbatim — see [`ControlPlane::qualify`] — because a
-//! name the client chooses is a name two clients can choose.) Against an
-//! append-only log the resent history is not input: it is a claim about what the
-//! session already contains. The handler checks that claim as a prefix and
-//! admits only the suffix, which is what keeps one client session on one
-//! Roundhouse session, and therefore on one accumulated warm prefix, instead of
-//! re-appending the conversation every turn and never matching anything.
+//! This surface admits complete client histories. It binds them by `thread-id`,
+//! then `session-id`, then an explicit `prompt_cache_key`. The authenticated
+//! namespace keeps identical client names in different tenants separate.
+//! The resent history is a claim about the stored prefix; only its suffix is
+//! appended. A rewrite starts a new internal log generation. Client identity
+//! and the upstream cache hint remain independent of that generation.
 //!
 //! The turn id is a content hash of that whole canonicalized conversation, which
 //! is what makes this API's own retry behavior — re-POSTing after a 5xx or a
@@ -127,7 +121,7 @@ enum Emitted<'a> {
 /// it, moving it there — with the pin — is the change to make.
 pub(crate) use wire::turn_id_for;
 
-/// Engine and store handles, plus this node's cache-key bindings.
+/// Engine and store handles, plus this node's conversation bindings.
 ///
 /// `Clone` is written out rather than derived, for the same reason as in
 /// [`http`](crate::http): deriving would demand `S: Clone` of a store that is
@@ -142,7 +136,7 @@ struct Compat<S: SessionStore, T: Tokenizer + Clone> {
     /// working on the surface it is being used on, and a router that captured
     /// one plane at mount time would never see the revocation.
     planes: Arc<dyn PlaneSource>,
-    /// Which session this node binds a client's cache key to.
+    /// Which session this node binds a client's conversation name to.
     ///
     /// Shared with the MCP control surface rather than owned here, which is why
     /// it is a constructor argument: an agent that narrows the routing of
@@ -325,7 +319,7 @@ where
     // qualified into and the dialect the reply is rendered in are read off it
     // too, and two of them could disagree across a refresh.
     let plane = state.planes.plane(now_ms()).await;
-    let admission = plane.turn_admission(&headers)?;
+    let mut admission = plane.turn_admission(&headers)?;
     // Immediately after the key lookup and before anything is parsed, bound or
     // granted. A rolling fair-use window is the one refusal an *agent* rather
     // than an operator acts on, so it has to arrive as a status code with a
@@ -339,19 +333,14 @@ where
             "only streaming is implemented; set `stream` to true",
         ));
     }
-    // Required, not defaulted: it is the session identity, and minting one here
-    // would silently give every request its own conversation — the exact
-    // failure this surface exists to avoid, and invisible from the client side
-    // because every turn would still answer.
-    let cache_key = request
-        .prompt_cache_key
-        .as_deref()
-        .filter(|key| !key.is_empty())
-        .ok_or_else(|| {
-            ApiError::unprocessable("`prompt_cache_key` is required: it names the session")
-        })?;
-
     let claimed = canonicalize(&request.instructions, &request.input)?;
+    let context = crate::request_context::RequestContext::from_request(
+        &headers,
+        request.prompt_cache_key.as_deref(),
+        &claimed,
+    )?;
+    let conversation_key = context.conversation_key().to_owned();
+    admission.request_context = Some(Arc::new(context));
     let turn_id = turn_id_for(&claimed);
     // Before `bind` consumes it, and off the *claimed* conversation rather than
     // off the session's items afterwards: the two are equal by construction —
@@ -369,15 +358,34 @@ where
         request.tools.as_ref(),
         request.tool_choice.as_ref(),
     );
-    let (session_id, input) = state
+    let (session_id, input, history_rewritten) = state
         .bind(
             &plane,
             &admission.principal,
-            cache_key,
-            codex_thread_id(&headers).as_deref(),
+            &conversation_key,
+            admission
+                .request_context
+                .as_ref()
+                .and_then(|context| context.thread_id.as_deref())
+                .or(codex_thread_id(&headers).as_deref()),
             claimed,
         )
         .await?;
+
+    let context = admission.request_context.as_ref().expect("parsed context");
+    let signal = state.conversations.observe_context(
+        &plane.qualify(&admission.principal, &conversation_key),
+        context,
+        history_rewritten,
+    );
+    tracing::info!(
+        session_id = %session_id,
+        client_session_id = context.session_id.as_deref(),
+        client_thread_id = context.thread_id.as_deref(),
+        context_signal = signal,
+        history_rewritten,
+        "observed client context"
+    );
 
     // Read before the spawn, for the reason `http` gives: an event appended
     // between this read and the start of the turn would fall outside the
@@ -455,13 +463,18 @@ where
         phase: Phase::Tailing,
     };
 
-    Ok(Sse::new(follower.into_stream())
+    let mut response = Sse::new(follower.into_stream())
         .keep_alive(KeepAlive::default())
-        .into_response())
+        .into_response();
+    response.headers_mut().insert(
+        "x-roundhouse-context-signal",
+        axum::http::HeaderValue::from_static(signal),
+    );
+    Ok(response)
 }
 
 // ---------------------------------------------------------------------------
-// Binding a cache key to a session
+// Binding a conversation name to a session
 // ---------------------------------------------------------------------------
 
 impl<S: SessionStore, T: Tokenizer + Clone + Send + Sync + 'static> Compat<S, T> {
@@ -469,17 +482,17 @@ impl<S: SessionStore, T: Tokenizer + Clone + Send + Sync + 'static> Compat<S, T>
         &self,
         plane: &ControlPlane,
         principal: &Principal,
-        cache_key: &str,
+        conversation_key: &str,
         thread_id: Option<&str>,
         claimed: Vec<Item>,
-    ) -> Result<(SessionId, Vec<Item>), ApiError> {
-        let (session_id, delta) = bind_prefix(
+    ) -> Result<(SessionId, Vec<Item>, bool), ApiError> {
+        let (session_id, delta, history_rewritten) = bind_prefix(
             &self.engine,
             &self.store,
             &self.conversations,
             plane,
             principal,
-            cache_key,
+            conversation_key,
             claimed,
         )
         .await?;
@@ -501,7 +514,7 @@ impl<S: SessionStore, T: Tokenizer + Clone + Send + Sync + 'static> Compat<S, T>
                 .bind_thread(principal, thread_id, session_id.clone())
                 .await;
         }
-        Ok((session_id, delta))
+        Ok((session_id, delta, history_rewritten))
     }
 }
 

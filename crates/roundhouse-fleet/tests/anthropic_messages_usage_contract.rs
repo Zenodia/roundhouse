@@ -97,6 +97,8 @@ fn quote() -> FrontierQuote {
         wire_protocol: WireProtocol::AnthropicMessages,
         prompt: "<|user|>how many tokens did that turn bill?".into(),
         segment_boundaries: Vec::new(),
+        session_id: None,
+        thread_id: None,
         prompt_cache_key: "sess_usage_contract".into(),
         expected_output_tokens: Some(512),
         // No client declared a ceiling on these fixtures, which is what

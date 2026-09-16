@@ -370,7 +370,7 @@ where
     // bind so the anonymous arm is visible at the site that decides what a turn
     // belongs to rather than buried in a helper.
     let cache_key = session_key(&headers, &params).unwrap_or_else(anonymous_key);
-    let (session_id, input) = bind_prefix(
+    let (session_id, input, _) = bind_prefix(
         &state.engine,
         &state.store,
         &state.conversations,

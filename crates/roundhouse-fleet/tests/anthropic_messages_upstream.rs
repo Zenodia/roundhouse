@@ -287,6 +287,8 @@ fn quote(credential: TurnCredential) -> FrontierQuote {
         // does too, so the body that goes over the socket is the blocked shape
         // rather than the degenerate single-block one.
         segment_boundaries: vec!["<|system|>be brief".len()],
+        session_id: None,
+        thread_id: None,
         prompt_cache_key: "sess_anthropic_upstream".into(),
         expected_output_tokens: Some(512),
         // No client declared a ceiling on these fixtures, which is what

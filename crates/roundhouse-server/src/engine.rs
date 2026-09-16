@@ -2570,6 +2570,7 @@ impl<S: SessionStore, T: Tokenizer + Clone> Engine<S, T> {
                     &access.credential,
                     handoff_note,
                     session.session_id(),
+                    admission.request_context.as_deref(),
                     // The *conversation's* count, not the request's: the only
                     // consumer below is the local path, which receives the
                     // prompt buffer and no toolbox at all, so handing it the
@@ -2676,6 +2677,7 @@ impl<S: SessionStore, T: Tokenizer + Clone> Engine<S, T> {
         credential: &TurnCredential,
         handoff_note: Option<&str>,
         session_id: &SessionId,
+        request_context: Option<&crate::request_context::RequestContext>,
         // The conversation's own token count — deliberately *not* the turn's
         // tools-inclusive `isl_tokens`. Only the local arm reads it, and a local
         // worker is sent the prompt buffer alone; see the call site (F4).
@@ -2782,10 +2784,11 @@ impl<S: SessionStore, T: Tokenizer + Clone> Engine<S, T> {
                     // the one part of this prompt that is new this turn and
                     // must not be inside the block a breakpoint caches.
                     segment_boundaries,
-                    // Stable for the life of the session: providers use it to
-                    // steer requests to the same cache node, so varying it
-                    // would defeat the hit we just routed on.
-                    prompt_cache_key: session_id.to_string(),
+                    session_id: request_context.and_then(|context| context.session_id.clone()),
+                    thread_id: request_context.and_then(|context| context.thread_id.clone()),
+                    prompt_cache_key: request_context
+                        .map(|context| context.prompt_cache_key.clone())
+                        .unwrap_or_else(|| session_id.to_string()),
                     // **This deployment's pricing estimate, and only that.** It
                     // is what the candidates above were quoted with and what the
                     // grant was opened against, so it must keep saying what the

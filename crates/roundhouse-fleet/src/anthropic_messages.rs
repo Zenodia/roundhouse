@@ -820,6 +820,8 @@ mod tests {
             wire_protocol,
             prompt: prompt(),
             segment_boundaries: boundaries(),
+            session_id: None,
+            thread_id: None,
             prompt_cache_key: "sess_anthropic".into(),
             expected_output_tokens: Some(512),
             // No client declared a ceiling on these fixtures, which is what

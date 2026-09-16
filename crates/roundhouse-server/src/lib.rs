@@ -84,6 +84,7 @@ pub mod metrics_api;
 pub mod prefix_admission;
 pub mod relay_api;
 pub mod relay_handoff;
+pub mod request_context;
 pub mod responses_api;
 pub mod shared_backend;
 #[cfg(feature = "test-support")]

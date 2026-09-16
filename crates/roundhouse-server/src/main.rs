@@ -1333,6 +1333,8 @@ mod tests {
                 wire_protocol,
                 prompt: "hi".into(),
                 segment_boundaries: Vec::new(),
+                session_id: None,
+                thread_id: None,
                 prompt_cache_key: "sess".into(),
                 expected_output_tokens: Some(16),
                 // No client in this test, so nothing declared a ceiling and

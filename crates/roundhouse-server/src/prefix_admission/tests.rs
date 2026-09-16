@@ -398,6 +398,7 @@ impl<S: SessionStore> Rig<S> {
             claimed,
         )
         .await
+        .map(|(session, delta, _)| (session, delta))
     }
 }
 
@@ -1379,4 +1380,38 @@ fn bind_prefix_keeps_its_own_doc_comment_separate_from_the_constants() {
          prose — the two comments were never split apart:\n{}",
         const_doc.join("\n")
     );
+}
+
+#[tokio::test]
+async fn rewrite_signal_distinguishes_divergence_from_busy_and_resumed_generations() {
+    for scenario in ["fresh", "rewrite", "busy", "resume"] {
+        let rig = Rig::new(scenario);
+        let claimed = vec![Item::user_text("current history")];
+        match scenario {
+            "rewrite" => {
+                rig.seed(0, vec![Item::user_text("different history")])
+                    .await
+            }
+            "busy" => rig.hold_busy(0, "other-node").await,
+            "resume" => {
+                rig.seed(0, vec![Item::user_text("different history")])
+                    .await;
+                rig.seed(1, claimed.clone()).await;
+            }
+            _ => {}
+        }
+        let (session, _, history_rewritten) = bind_prefix(
+            &rig.engine,
+            rig.store.as_ref(),
+            &rig.conversations,
+            &ControlPlane::Open,
+            &rig.principal,
+            &rig.key,
+            claimed,
+        )
+        .await
+        .expect(scenario);
+        assert_eq!(history_rewritten, scenario == "rewrite", "{scenario}");
+        assert_eq!(session, rig.generation(u32::from(scenario != "fresh")));
+    }
 }

@@ -400,7 +400,18 @@ impl FrontierClient for OpenAiResponsesClient {
         // Before the route is resolved, so a toolbox this client cannot restate
         // never reaches a credential, let alone a socket.
         let body = Self::body(quote, model)?;
-        let route = self.route(&quote.credential, provider)?;
+        let mut route = self.route(&quote.credential, provider)?;
+        for (name, value) in [
+            ("session-id", &quote.session_id),
+            ("thread-id", &quote.thread_id),
+        ] {
+            if let Some(value) = value {
+                let value = HeaderValue::from_str(value).map_err(|_| {
+                    FrontierError::Upstream(format!("invalid `{name}` request metadata"))
+                })?;
+                route.headers.insert(HeaderName::from_static(name), value);
+            }
+        }
         let response = route
             .client
             .post(format!("{}{}", route.base, self.responses_path))
@@ -551,6 +562,8 @@ mod tests {
             },
             wire_protocol,
             prompt: "how many tokens did that turn bill?".into(),
+            session_id: None,
+            thread_id: None,
             // Deliberately populated even though this client ignores it -- see
             // `the_segment_structure_does_not_reach_the_responses_wire`.
             segment_boundaries: vec![8, 20],

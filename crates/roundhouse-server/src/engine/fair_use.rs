@@ -340,6 +340,7 @@ mod tests {
     /// the next run's answer.
     fn capped_for(principal: Principal, max_tokens: u64) -> Admission {
         Admission {
+            request_context: None,
             principal,
             policy: Arc::new(TurnPolicy::unrestricted()),
             budget: None,
