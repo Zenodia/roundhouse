@@ -28,19 +28,41 @@ features — the first is what makes the second possible.
 > Dynamo selection, streaming turn engine, HTTP/SSE transport, Redis session
 > store and spend ledger; the control plane (principals, projects,
 > memberships, keys, per-key policy, budgets); the admin plane; the MCP
-> control surface; the validate/steer loop; real frontier provider clients;
+> control surface; the validate/steer loop; real frontier provider clients on
+> two wire dialects (OpenAI Responses and Anthropic Messages) and serve
+> surfaces for both, so an unmodified Claude Code points at `/v1/messages` the
+> way an unmodified Codex points at `/v1/responses`;
 > a real `codex` binary driving all of it end to end behind a feature gate;
 > emission of NeMo Relay's interchange formats from the same log; providers
 > as configuration behind a per-provider client registry; rolling fair-use
-> session windows; and two-tier model selection with per-dispatch failover,
-> steered by text rather than by a tool call.
+> session windows; two-tier model selection with per-dispatch failover,
+> steered by text rather than by a tool call; `topham`, the operator
+> entry point that turns a saved profile into a running agent on either
+> client and either topology; and the control surface wired to Claude Code —
+> the MCP registration and the signage generated as argv, control calls
+> correlated back to the turn that asked for them, and a real client
+> dispatching one end to end.
 >
 > Not built: the WebSocket and gRPC transports, and resuming an interrupted
 > generation from the partial output already durable in the log. Metrics are
-> per-process. Two things the M9 addendum defers by name: there is no
-> operator entry point that *produces* the generated Codex config (it is a
-> library function), and the MCP surface still ignores the `_meta.threadId`
-> a Codex client sends on every `tools/call`.
+> per-process. The MCP surface reads all three correlators its clients attach —
+> the `_meta.threadId` a Codex client stamps on every `tools/call`, the
+> client's own session id beside it in `_meta["x-codex-turn-metadata"]`, and
+> the `_meta["claudecode/toolUseId"]` Claude Code sends — but only the last
+> has been observed arriving from a real binary; a control call chained
+> through NeMo Relay is likewise stated rather than tested. What each resolves
+> to is now the same on every node of a deployment that names a
+> `ROUNDHOUSE_REDIS_URL`, which is what puts the three correlation maps in one
+> shared store; without one they are per-process, and a call landing on a node
+> that served none of the conversation's turns falls back to a guess. Two of
+> the three are exact — a tool-use id and a thread id each name one
+> conversation — where the third, codex's own session id, names the whole
+> agent family's, which is why it is weighed after the thread arm and before
+> the tool-use id: an id this deployment itself emitted is exact enough to be
+> trusted last, once a client's own more specific claims have already come up
+> empty. What stays a guess either way is "this agent's most recent
+> conversation", which is answerable only by
+> having watched the turns arrive.
 
 Roundhouse depends on Dynamo but is not part of it. It pins two Dynamo crates
 (`dynamo-kv-router` with the `standalone-selection` feature, and `dynamo-tokens`)
@@ -63,7 +85,8 @@ crates.io, the pin becomes a plain version.
 | `roundhouse-mcp` | The control surface as an MCP server: eight tools, overlays that only narrow, and one file that knows what JSON-RPC is |
 | `roundhouse-relay` | NeMo Relay's published formats — ATOF events, ATIF v1.7 trajectories, `LlmOptimizationSummary` — produced from the same session log |
 | `roundhouse-store-redis` | Redis Streams `SessionStore` and spend ledger: entry id == seq, `PX` lease on the Redis clock, fenced appends via Lua. Selected by `ROUNDHOUSE_REDIS_URL`; absent means in-memory sessions and spend that die with the process |
-| `roundhouse-server` | Turn engine and six surfaces over one log — native HTTP/SSE, the OpenAI Responses API at `/v1/responses`, the MCP mount at `/mcp`, the admin REST plane under `/v1/admin`, `/v1/metrics` and its dashboard, and Relay's three session reads — plus `codex_launch`, which writes the config a client reads, and the binary |
+| `roundhouse-server` | Turn engine and seven surfaces over one log — native HTTP/SSE, the OpenAI Responses API at `/v1/responses`, the Anthropic Messages API at `/v1/messages`, the MCP mount at `/mcp`, the admin REST plane under `/v1/admin`, `/v1/metrics` and its dashboard, and Relay's three session reads — plus `codex_launch`, `claude_launch` and `relay_handoff`, which produce the configuration each client and a chained Relay read, and the binary |
+| `topham` | The operator entry point, and the one crate that depends *upwards* on `roundhouse-server`: profiles, `plan`, `launch`, `relay`, `mint`, and an interactive screen over the first three of those — `mint` takes the tenancy arguments (`--project`, `--user`) a profile deliberately does not carry, so it stays a subcommand. It reads the generators rather than restating them, which is what keeps `roundhouse-server/src/main.rs` free of a flag parser |
 
 ## Design
 
@@ -184,11 +207,10 @@ both bind — the narrower one refuses first. A turn over its window gets HTTP
 429 `fair_use_exceeded` with `error.type: "usage_limit_reached"`, naming the
 scope, the window, the quantity that ran out, and `resets_at` rounded *up* to
 the earliest second the window could have room — retryable, and no grant is
-taken for a refused turn. Enforcement is single-node only in this milestone
-(the counters live in the process's memory), so a deployment that sets
-`ROUNDHOUSE_REDIS_URL` while also configuring `fair_use` gets a boot warning
-that two nodes serving one project enforce two independent ceilings rather
-than one shared one.
+taken for a refused turn. Where `ROUNDHOUSE_REDIS_URL` is set the counters are
+rolling buckets in that Redis, so every node serving a project shares one
+ceiling; with no Redis they live in the process's memory, and a deployment that
+configures a window without one gets a boot warning saying so.
 
 **The admin plane** (`/v1/admin/...`) is the only surface that writes tenancy:
 projects, users, memberships, and key mint/revoke, plus one read that exists
@@ -215,11 +237,20 @@ turn's ceiling.
 
 Configuration is environment variables and nothing else, because a flag parser
 in the composition root is the first place a deployment concern leaks in:
-`ROUNDHOUSE_ADDR`, `ROUNDHOUSE_REDIS_URL`, `ROUNDHOUSE_CATALOG`,
-`ROUNDHOUSE_CONTROL_PLANE`, `ROUNDHOUSE_JUDGE_MODEL`,
+`ROUNDHOUSE_ADDR`, `ROUNDHOUSE_REDIS_URL`, `ROUNDHOUSE_REDIS_NAMESPACE`,
+`ROUNDHOUSE_CATALOG`, `ROUNDHOUSE_CONTROL_PLANE`, `ROUNDHOUSE_JUDGE_MODEL`,
 `ROUNDHOUSE_FRONTIER_UPSTREAM`, and — for the two auth modes, which address
 genuinely different origins — `ROUNDHOUSE_OPENAI_API_BASE` and
 `ROUNDHOUSE_OPENAI_PASS_THROUGH_BASE`.
+
+`ROUNDHOUSE_REDIS_NAMESPACE` names the deployment boundary every shared key
+in `roundhouse-store-redis` is built under (M14.2, R-S3): absent defaults to
+`rh`, the namespace every deployment used before this variable existed;
+set-but-empty is a boot refusal rather than a silent read as absent, because
+an operator who typed the variable meant *something* by it, and a namespace
+that is itself blank would collide with the unnamespaced default. Read
+whether or not `ROUNDHOUSE_REDIS_URL` is set, so a typo is caught at the
+boot that introduced it rather than on the day a Redis is added.
 
 ## The MCP control surface
 
@@ -241,8 +272,16 @@ either a pure read of committed state or a write to a node-local control store
 the engine reads at the start of the next turn.
 
 The surface is mounted at `/mcp` as streamable HTTP, behind the same key
-resolution as every other route, with the turn key as the bearer; a `GET` on it
-is 405. Every descriptor states all three MCP annotations — `readOnlyHint`,
+resolution as every other route — the turn key, presented however that client
+presents it on a turn: a bearer for Codex, the dedicated header for Claude
+Code, and the same `ControlPlane::scope` for both; a `GET` on it is 405.
+**Which conversation a call concerns** is answered in a fixed order: a
+`conversation` argument the model wrote, then the id of the `tool_use` block the
+call is answering where the client sends one, and only then the caller's most
+recent conversation. See "Control tools from Claude Code" below for why the
+middle rung exists.
+
+Every descriptor states all three MCP annotations — `readOnlyHint`,
 `destructiveHint`, `openWorldHint` — with the last two `false` on all eight,
 because the tools reach nothing outside this deployment and their writes only
 narrow. That is not decoration: under `approval_policy = "never"`, which
@@ -287,7 +326,18 @@ which is a different question from "did anything in the recent window fail
 badly". Roundhouse's own control calls — the `mcp__roundhouse__*` surface
 above — are their own category and count toward none of these: an agent
 polling `status` or adjusting its preferences is talking to us, not stuck, and
-a genuinely unknown tool still counts as unrecognised.
+a genuinely unknown tool still counts as unrecognised. Recognising them takes
+two tests rather than one, because the two clients spell the same call
+differently by the time it reaches the log: the flat `mcp__roundhouse__<tool>`
+a Claude Code session stores, and the bare name plus a separate `namespace`
+field the Responses wire keeps beside it since M17 (R-N6). The Responses
+recogniser reads the field first — `mcp__roundhouse` with a name in the eight
+is ours, and any other namespace is a third party's own tool, not ours — and
+falls back to the bare name only for a record written before the field
+existed, which is the one under-count still left: a call or two on those older
+records, chosen over the failure the fallback replaced, which was counting
+every control call a Codex client made as work on the task and steering an
+agent that had done nothing wrong.
 
 A signal states what it saw in the indicative and never suggests: "this call
 has produced identical output four times" is a fact the judge weighs, while
@@ -459,10 +509,12 @@ The generator refuses the three input shapes whose output would be silently
 wrong — a relative catalog path (Codex resolves it against the config's
 directory, not ours), a base URL that does not end in the API prefix (turns
 404 while the MCP handshake, derived from the same string, still succeeds and
-makes the client look healthy), and a non-UTF-8 path. What it does not yet have
-is an **operator entry point**: no CLI subcommand or admin route produces
-these files, and whether that is a subcommand or an admin read beside key
-minting is deferred by name.
+makes the client look healthy), and a non-UTF-8 path.
+
+The **operator entry point** that calls it is `topham launch` — see
+[Launching with topham](#launching-with-topham). It resolves a saved profile,
+writes these two files into that profile's own `CODEX_HOME`, and `exec`s the
+client; `topham plan` prints the same resolution and spawns nothing.
 
 ### The gated real-binary suite
 
@@ -480,9 +532,15 @@ spawning processes; `--test-threads=1` is not politeness, because each test owns
 a `CODEX_HOME` and `codex exec resume --last` resolves "last" inside it. Once
 opted in, a missing binary is a loud panic naming `ROUNDHOUSE_TEST_CODEX_BIN`
 rather than a silent skip. No network is needed: loopback only, a pinned
-catalog, no login, and a cleared child environment — the last asserted on the
-constructed command rather than on the wire, because a credential that was
-available but never consulted leaves every wire assertion green.
+catalog, no login, and a cleared child environment. That last one is asserted
+on the constructed command's key set, and the M11.2b review pinned exactly how
+far that reaches: `Command::get_envs()` reports only the explicit additions, so
+the guard checks what the harness adds and cannot see a dropped `env_clear()`
+or an ambient variable riding through it. The shared harness in
+`tests/common/e2e.rs` carries that fact as a test; the Claude suite closes the
+gap on the wire (an ambient credential shows up as an `authorization` header
+the seat test refuses), while here no credential is ever consulted, so the
+wire has nothing to show — a documented gap, not a covered one.
 
 **Version vigilance.** The binary under test is `codex-cli 0.146.0` (tree
 `e363b08`, 2026-07-28); the Cargo pin for the conformance crates is `6344a65`
@@ -515,14 +573,373 @@ semantics (`response.completed` ends the stream; `response.failed` and
 (`cached_input_tokens` lands in Codex's `input_tokens_details.cached_tokens`),
 and a real-socket round trip through Codex's HTTP stack.
 
-The integration is also the thesis in miniature. Codex-over-HTTP re-sends the
-whole conversation every turn (`previous_response_id` is a websocket feature),
-and it names the conversation with `prompt_cache_key`. Against an append-only
-log that resent history is a *claim*, not input: the surface checks it as a
-prefix of the session named by the cache key and admits only the suffix — so a
-stateless client gets stateful routing, one accumulated warm prefix, and
-idempotent retries (the turn id is a content hash of the conversation) without
-knowing any of it is happening.
+The Responses surface accepts a complete conversation on each request. It binds that history to `thread-id`, then `session-id`, then an explicit `prompt_cache_key`, in that order. These names remain inside the authenticated caller's namespace. It compares the resent history with the stored prefix and admits only the suffix. A history rewrite starts a new internal generation.
+
+Roundhouse forwards the supplied `session-id`, `thread-id`, and `prompt_cache_key` to its OpenAI Responses provider. The cache key remains independent of the internal history generation. If no cache key is supplied, Roundhouse computes a 64-character SHA-256 digest. Its input includes canonical system/developer messages before the first user message, followed by that user message. A content hash cannot identify a conversation: requests without any explicit conversation identity are refused.
+
+The response header `x-roundhouse-context-signal` reports `first_seen`, `prefix_unchanged`, `prefix_changed`, `history_rewritten`, or `window_changed`. The last value compares Codex's `x-codex-window-id`. These are context observations, not proof that compaction occurred. Compaction can preserve the first user message, and prompt edits can change it.
+
+Observations are node-local and reset on restart. Structured logs report the signal without prompt content. Roundhouse still refuses opaque compaction input items and does not serve `/v1/responses/compact`. See the [session research](agent-docs/research/agent-session-context.md) for protocol evidence and remaining work.
+
+## Hooking up Claude Code
+
+`POST /v1/messages` is the same idea in the other dialect: an Anthropic Messages
+surface over the same event log, same engine, same admission, same prefix check.
+`/v1/messages/count_tokens` is served from this deployment's own tokenizer,
+because the client's fallback when that route is missing is a real one-token
+create against the routed model.
+
+`roundhouse_server::claude_launch` is `codex_launch`'s sibling for the client
+that speaks it. Two things about it are different, and both are facts about the
+client rather than choices:
+
+- **It writes no file.** Claude Code's whole redirect surface is environment —
+  `ANTHROPIC_BASE_URL`, read by its vendored SDK, and `ANTHROPIC_CUSTOM_HEADERS`,
+  a newline-separated `Name: Value` block merged *after* the SDK's own auth
+  headers — so the output is an environment map and there is no settings overlay
+  beside it.
+- **The base URL is the deployment root, not the API prefix.** The SDK appends
+  `/v1/messages` itself. A value that already carries the prefix is refused by
+  name, which is the exact inverse of the codex generator's refusal and for the
+  same reason: each client's constructor refuses the shape *its* client cannot
+  use.
+
+The turn key therefore rides the map rather than a variable *name* the way the
+codex config does, because `ANTHROPIC_CUSTOM_HEADERS` offers no indirection. The
+"secrets ride env only, never a file" rule is kept by the types instead: the key
+is held as a redacting `Secret`, the rendered map has no `Serialize` and no
+`Display`, and one documented seam yields plaintext to whatever spawns the
+process.
+
+- **`ClaudeAuthKind::RoundhouseKey`** sets `ANTHROPIC_API_KEY` to a roundhouse
+  sentinel, the analogue of writing `env_key` beside `requires_openai_auth =
+  false`. A subscription login is suppressed only when one of five inputs
+  resolves, and `ANTHROPIC_BASE_URL` is not one of them — so an empty variable
+  means a logged-in user's OAuth bearer is presented to *our* base URL, with no
+  host check anywhere on the client's inference path. Two limits are recorded
+  rather than reconciled: interactive mode prompts once before the key overrides
+  a subscription, and `CLAUDE_CODE_REMOTE=true` defeats the suppression entirely,
+  so a launch inside a Claude Code Remote container forwards a login whatever it
+  says on the tin. The sentinel is safe to set because the admission boundary
+  treats it as inert: it lives beside the forwarding gate that refuses to pass
+  it upstream, so it can never arrive at Anthropic as an `x-api-key` beside a
+  real seat — a `401` that reads exactly like a revoked login.
+- **`ClaudeAuthKind::ForwardedClaudeLogin`** sets no API key and **refuses** a
+  launch that also carries one of the five suppressing inputs, returning the same
+  list in the form a launcher can enforce. Each of the five leaves every request
+  valid, so the run looks healthy and the seat simply never arrives. The three
+  cloud-provider selectors are refused under *both* kinds and with their own
+  message, because they defeat the redirect rather than the login: the client
+  never reads the base URL, never reaches this deployment, and answers anyway.
+- **The MCP wiring is generated too, and it is argv rather than a file.** Two
+  arguments go in front of the operator's own: `--mcp-config` with the
+  registration inline, and `--append-system-prompt` with the signage. See
+  "Control tools from Claude Code" below.
+- **Chained through NeMo Relay, the same map is what is handed to the client.**
+  Relay overwrites `ANTHROPIC_BASE_URL` with its own gateway and *merges* its
+  proxy token into `ANTHROPIC_CUSTOM_HEADERS` — a line-wise replacement of the
+  matching name only — then forwards headers it does not own untouched and
+  strips its own credential before the hop. So the turn key survives on its
+  dedicated header, a chained turn keeps the Direct semantics exactly, and one
+  generator serves both topologies; Relay is aimed at this deployment's root
+  through `[upstream] anthropic_base_url` with no auth header of its own. That
+  is asserted against a real Relay rather than argued from its source. The
+  module doc carries the runbook: the fallback wiring for a credential-less
+  client (where Relay carries the key in `Authorization` and the turn is
+  key-authed only), the two hazards that are documented refusals rather than
+  guards, and why resumption is not offered in band on this surface.
+
+Like the codex generator, this is a library function — and the thing that calls
+it is `topham launch` for the Direct topology and `topham relay` for the
+chained one, both handing the client the *same* generated map. See
+[Launching with topham](#launching-with-topham).
+
+The surface the map points at is shaped by three further facts about the same
+client, and each is a cost rather than a preference:
+
+- **It has no field to name its session with.** There is no
+  `prompt_cache_key` on this wire, so the session is resolved from
+  `x-claude-code-session-id`, then from `metadata.user_id` — which has shipped
+  in two different spellings and is parsed in both, because a client upgrade
+  that re-keyed every session would silently cold-start every warm prefix.
+- **A malformed stream costs a whole extra turn, not an error.** Claude Code
+  dispatches SSE frames on the `event:` name and drops a frame that has none in
+  silence; a stream it cannot consume triggers a second, non-streaming request
+  for the same turn at full price. So the emission is shaped to make the
+  ordering mistakes its accumulator throws on unreachable rather than merely
+  untested, and every stream the suite produces is judged by a strict
+  conformance reader written from the pinned spec — the tier-1 oracle, which
+  exists because both official SDKs are deliberately non-validating and would
+  agree with anything we sent them.
+- **Its accounting axes are not ours.** Anthropic's three input counters are
+  disjoint and roundhouse's nest cached and written input inside the total, so
+  the projection subtracts rather than forwards. Getting that backwards reports
+  a warm turn as nearly two cold ones, in the direction that flatters the
+  savings figure.
+
+What is not here: no `/v1/models` (see the status note). The evidence for the
+client's shape is request bodies captured from the shipping binaries through a
+loopback mock, which live in `crates/roundhouse-server/tests/fixtures/` and are
+driven through the surface on every run. **Two client lines are pinned, not
+one** — 2.1.251 and 2.1.257 — and every fixture-driven test runs against both,
+because a suite pinned to one answers either "does this still serve the client
+it was written against" or "does it serve the client shipping today", never the
+question a mixed fleet actually asks. The one shape difference between them is
+what the current line appends after each `--continue`'s new question: a
+remaining-budget notice it rewrites per request, which is ephemeral and
+therefore never becomes a log item — a counter admitted as history forks the
+session the first time it counts down, and every turn still answers.
+
+### Control tools from Claude Code
+
+The same eight tools the Codex client reaches over `/mcp`, reached by this one —
+and everything that differs is a fact about the client.
+
+**The tool name is flat, and the log stores it flat.** Codex sends an MCP call
+as a bare `name` plus a separate `namespace` field; Claude Code folds the two
+into one string, `mcp__roundhouse__status`, everywhere — in the `tools[]` it
+declares, in the `tool_use` block it emits, and in the `--allowedTools` grant
+that permits it. `ClientDialect` is one arm per surface saying which, and the
+Messages surface keeps the flat name whole: it has no separate namespace field
+to render outbound, so the only reader of a stored name there is the validate
+loop's control-traffic exclusion, and splitting it on the way in would move the
+`turn_id` of every already-stored tool-using session for no reader's benefit.
+The Responses surface is different since M17 (R-N6): the canonicalisation
+keeps codex's `namespace` beside the bare name rather than discarding it, and
+the outbound projection re-emits it, so a resent call still resolves against
+codex's own `ToolName { name, namespace }` lookup. The exclusion learned to
+recognise both spellings in the same change — before it, every control call
+made over the *Responses* wire was counted as the agent's work, because the
+namespace the flat prefix test looked for had been dropped at
+canonicalization.
+
+**A call is correlated by the tool-use id it is answering.** Claude Code puts
+`_meta["claudecode/toolUseId"]` — the `tool_use.id` roundhouse itself emitted —
+on every `tools/call`. That names exactly one conversation, so a `status` from
+inside a subagent's tool loop resolves to the subagent's log rather than to
+whichever of the principal's turns opened most recently. The binding is written
+as the call is streamed to the client, which is the one moment both halves are
+in one place; the id is checked against the caller, and one that is not the
+caller's is indistinguishable from one nothing ever emitted. An id two of one
+principal's sessions claimed is remembered as ambiguous and answers as an
+unknown one does, rather than resolving to whichever session bound it last. A
+call carrying no such key falls back to the principal's most recent
+conversation exactly as before — for a Codex call, only after its own two
+correlators have both missed.
+
+**The registration is inline argv, and the key rides `${VAR}`.** Of the config
+forms this client honours, `--mcp-config` is the only one that writes nothing:
+a project `.mcp.json` would land in the operator's own repository, and a
+`settings.json` `mcpServers` key is silently inert at 2.1.257 — verified, not
+assumed. The header value is the literal `${ROUNDHOUSE_API_KEY}` (whatever the
+profile's `key-env` names), expanded by the client from the environment the same
+launch laid, so the secret is in no argv, no file, and no process listing; the
+unexpanded-literal hazard is closed by `topham` refusing a launch whose key
+variable is not exported. `--strict-mcp-config` is a profile switch, off by
+default, because it drops *every* other MCP configuration and not merely a
+colliding one.
+
+**Signage rides `--append-system-prompt`.** The Claude analogue of the codex
+skills directory, and a single appended block rather than a directory for two
+reasons the client forces: a skills listing arrives as an interior system
+message this surface admits strictly, so editing it would fork every live
+session, and owning `CLAUDE_CONFIG_DIR` to write into evicts the login a
+forwarded-login launch exists to forward. The text names the eight tools and
+the *occasion* for each, never their descriptions — those already ride in
+`tools[]` on every request, and a second copy would cost the fleet the same
+context twice per turn.
+
+**What the launcher will not decide for you.** Headless, this client
+synthesises a permission refusal for an `mcp__*` tool its own argv does not
+name — no request reaches `/mcp` at all — so a `-p` run needs
+`--allowedTools mcp__roundhouse__status` (and `--dangerously-skip-permissions`
+is refused outright when running as root). `topham plan` says so in its notes
+rather than inventing a grant, and an operator argv that repeats a flag the
+launcher generates is refused by name instead of silently shadowing it.
+
+**Roundhouse adds no tool of its own to a Messages request.** The client's
+`tools[]` is forwarded verbatim; anything injected there is a name the client's
+own loop cannot dispatch, and it would move the admitted input token count the
+client was quoted on.
+
+### The real client, on both topologies
+
+`crates/roundhouse-server/tests/claude_e2e.rs` is `codex_e2e`'s sibling: it
+spawns the real `claude` binary against a loopback roundhouse with exactly the
+environment `claude_launch` generates, and doubles nothing on the client side.
+
+```bash
+timeout 300 cargo test -p roundhouse-server --features e2e-claude \
+    --test claude_e2e -- --include-ignored --test-threads=1 --nocapture
+```
+
+Real: the binary, the socket, the surface, the control directory and its minted
+turn key, the log, the prefix check, and the tool the client chose to run.
+Scripted: only the frontier, so the suite decides when a `tool_use` block is
+emitted rather than asking a model to decide. The child's environment is
+*cleared* and rebuilt from the generated map plus five named isolation
+variables, because inside a Claude Code Remote container the ambient
+`CLAUDE_CODE_REMOTE=true` would make the client present that container's managed
+OAuth token to whatever base URL it was handed. Two guards stand behind that,
+and they catch different things: a no-binary test asserts the key set of the
+*constructed command* with `==`, which checks the generated map and only that —
+`Command::get_envs()` reports the explicit `env()` diff and reports it
+identically whether or not the clear ran — so a dropped `env_clear()` or an
+ambient leak is caught by the wire test instead, as an `authorization` header on
+a request that reached this deployment.
+
+One of its tests is the closure of the paragraphs above: a real client,
+launched through a real `topham`, is answered with a `tool_use` for
+`mcp__roundhouse__status`, dispatches it against this deployment's own `/mcp`
+mount, and comes back. Both routers are on the one socket, and the assertions
+are at both edges — the turn key arrived on the control call, the flat name was
+split back apart on the MCP wire, the answer named the conversation the call was
+made from rather than the principal's most recent one, the resend rejoined the
+session, and the validate fold counted none of it as the agent's work. The
+"rather than the most recent one" half is not free: a rival conversation of the
+same principal's takes the most-recent slot in front of every control call, so
+an implementation that guessed would answer green about the wrong log, and does
+— that is what the assertion catches when the correlation is removed.
+
+Two of its tests drive the **chained** topology through a real NeMo Relay
+(`ROUNDHOUSE_TEST_RELAY_BIN`, `nemo-relay run --agent claude`), and that is
+where the chained wiring stopped being an argument from Relay's source: the turn
+key arrives on its dedicated header, Relay's own proxy credential never leaves
+Relay's gateway, `?beta=true` survives the base-URL concatenation, and a
+`--continue` through Relay's alphabetizing re-encode extends the session rather
+than forking it.
+
+## Launching with topham
+
+Both generators above are library functions, and until `topham` nothing an
+operator could run produced their output. `topham` is that: one binary, above
+the server in the dependency graph, that turns a saved profile into a running
+agent.
+
+```bash
+topham mint --profile work --project acme --user ada   # prints an export line
+export ROUNDHOUSE_API_KEY=rh_turn_…                    # the key rides the environment
+topham plan work                                       # what it resolves to; spawns nothing
+topham launch work -- -p "hello"                       # becomes the client
+topham relay chained -- -p "hello"                     # becomes nemo-relay running the client
+topham                                                 # plan, launch and relay, on a screen
+```
+
+**A profile names things and never holds a secret.** It is TOML under
+`$XDG_CONFIG_HOME/topham/profiles/<name>.toml` (else `~/.config/…`, the rule
+NeMo Relay follows) and carries an agent, a deployment root, an auth kind, the
+**name** of the variable the turn key is read from, a topology, and for Codex an
+optional model slug and catalog path:
+
+```toml
+agent = "claude"                        # claude | codex
+deployment-root = "http://127.0.0.1:8080"   # the root, with no /v1
+auth = "roundhouse-key"                 # roundhouse-key | forwarded-login
+key-env = "ROUNDHOUSE_API_KEY"          # a name, never a value
+topology = "direct"                     # direct | chained
+strict-mcp = false                      # claude only: drop other MCP servers
+```
+
+A profile carrying a `rh_`-shaped value is **refused on load, naming the
+field** — before deserialization, so a key parked in a field this vocabulary
+does not have is still found. A configuration directory is exactly what ends up
+in a dotfile repository, and nothing downstream can tell that copy from a live
+credential. `topham mint` writes nothing to disk for the same reason: it posts
+to `/v1/admin/projects/{p}/members/{u}/keys` with an admin key from
+`ROUNDHOUSE_ADMIN_KEY` and prints the `export` line for the profile's variable.
+
+**The refusals are the point of it being a program.** A launcher that merely
+exported three variables would not catch any of these, and every one of them
+fails by *running*:
+
+- a `ForwardedLogin` profile next to an ambient `CLAUDE_CODE_USE_VERTEX`
+  forwards nothing while every request stays valid. `topham launch` checks
+  `ClaudeLaunch::must_be_unset` against the operator's own environment — the
+  generator's table, not a copy — and refuses before it writes or spawns
+  anything;
+- a `RoundhouseKey` profile with no key exported reaches roundhouse with no
+  credential, which roundhouse *admits*, degrading the turn to local-only
+  routing rather than refusing it. Refused when the profile is resolved;
+- `topham launch` on a chained profile, and `topham relay` on a direct one, are
+  each refused naming the other subcommand: both would work, and both would run
+  a topology the profile does not describe;
+- `topham relay` runs the same isolated `nemo-relay run --dry-run` preflight the
+  gated suite runs and refuses when `/etc/nemo-relay/config.toml` has re-aimed
+  the upstream — the system layer is folded in *after* an explicit `--config`
+  and wins — and it refuses an ambient `NEMO_RELAY_ANTHROPIC_BASE_URL`
+  separately, because that layer sits above `--config` and the preflight
+  deliberately clears it;
+- `topham launch` on a claude profile also **generates argv**, not only
+  environment — the MCP registration and the signage — and refuses an operator
+  tail that repeats one of those flags. Both orders of a duplicated
+  `--mcp-config` produce a session that runs: one where the control surface is
+  silently absent, one where the operator's own servers are, and neither is
+  reported by anything;
+- `topham launch` and `topham plan` also read the settings files the client
+  itself will load — `$CLAUDE_CONFIG_DIR/settings.json` (else
+  `$HOME/.claude/settings.json`), `./.claude/settings.json` and
+  `./.claude/settings.local.json` — and refuse one whose `env` block would
+  override a generated variable or set a suppressor, naming the file and the
+  key. An administrator's managed-settings file is deliberately *not* read: it
+  is outside the operator's control and its path is platform-specific in a way
+  nothing here verified, so that one layer is stated in the plan's notes rather
+  than enforced.
+
+**`topham plan` prints the whole resolution with every secret redacted**, and
+the redaction is the generators' own `Debug` rather than this launcher's: the
+turn key renders as `redacted:<fingerprint>` and any declared ambient variable
+as `<set>`. The generated argv is printed one argument per line with the key
+variable **unexpanded** — what is passed, not what it becomes — and the signage
+is named by length rather than printed, the same call the plan already makes
+about codex's generated `config.toml`. It also prints the limits no refusal can
+close — under a subscription login an *interactive* Claude Code session asks
+once before it will use the API key (the same gate that makes it ask before
+calling a control tool), a headless one needs `--allowedTools` naming the tool
+before it will call one at all, and a chained **codex** run is unproven because
+Relay splices its own `--config model_provider=…` onto the client's argv and
+that override outranks the generated `config.toml`.
+
+`topham` with no subcommand opens an interactive screen: the profile list, an
+editor for the fields above, a plan pane rendered from the same redacted
+resolution, and launch/relay actions. Every action on it is a subcommand a
+script can run, and the screen owns no state the profile files do not — the
+list is re-read from the directory after every write. Its state transitions are
+pure functions over key events and are tested without a terminal; what is left
+is the draw-and-read loop.
+
+### What proves it
+
+`topham`'s own suite covers the profile round trip and the secret refusal,
+whole-output plan snapshots for both agents and both auth kinds, the
+`must_be_unset` refusal naming the variable, the env layering (a generated
+variable beats an ambient one of the same name; an unrelated ambient variable
+survives), and `mint` against the real `admin_router` on a loopback socket.
+
+Above that, the gated real-binary suites close the loop the launcher exists to
+close. `claude_e2e` drives the real client *through a real `topham`* — a
+`topham launch` on Direct, a `topham relay` on Chained, and a third that adds
+the control surface — and asserts at roundhouse's edge exactly what the
+hand-built tests assert. The child they spawn is handed a turn key, two homes
+and a `PATH` and **no `ANTHROPIC_*` variable at all**, so a launcher that
+resolved the profile wrongly cannot pass by inheriting anything; the control
+run adds the argv half of that, since nothing but the launcher registers the
+`/mcp` mount with the client. `codex_e2e` gains the same shape (no `codex`
+binary is available where it was written, so it has never been run):
+
+```bash
+cargo build -p topham
+ROUNDHOUSE_TEST_TOPHAM_BIN=$PWD/target/debug/topham \
+ROUNDHOUSE_TEST_CLAUDE_BIN=… ROUNDHOUSE_TEST_RELAY_BIN=… \
+    timeout 900 cargo test -p roundhouse-server --features e2e-claude \
+    --test claude_e2e -- --include-ignored --test-threads=1
+```
+
+A missing `ROUNDHOUSE_TEST_TOPHAM_BIN` under `--include-ignored` is a loud panic
+naming it, never a silent skip — and it names a *freshly built* binary on
+purpose, because a stale one reports green for code nobody compiled. That is now
+visible rather than merely warned about: `topham --version` prints the commit
+the binary was built from, and the suite compares it against `HEAD` and warns
+when the two disagree.
 
 ## Metrics and the dashboard
 
@@ -656,9 +1073,13 @@ starting anyway would serve every turn under prices nobody chose.
 Without the variable the binary serves its offline echo stub, for which every
 price is zero — so the demo demonstrates the token breakdown, not the savings.
 `ROUNDHOUSE_FRONTIER_UPSTREAM` is the same load-or-die posture for the
-transport: unset serves the echo stub, `openai_responses` dispatches over the
-real OpenAI Responses wire, and an unrecognised name is refused rather than
-quietly demoted.
+transport: unset serves the echo stub, `openai_responses` dispatches to real
+providers, and an unrecognised name is refused rather than quietly demoted. Its
+name is historical — when it was written there was one client, so naming the
+wire and switching real dispatch on were the same act. The provider registry
+made the dialect a per-catalog-entry fact, so the value is now a switch and each
+provider's wire comes from its entries' `wire_protocol`; it keeps its spelling
+because renaming it would break every deployment's environment for cosmetics.
 
 **Providers are data, not one hardwired transport.** The same catalog file
 carries a `"providers"` section: `name -> { base_url, routes: { models?,
@@ -672,7 +1093,13 @@ named; a catalog written before this section existed still loads unchanged.
 Two load-or-die cross-checks make the registry total rather than merely usual:
 every entry's `provider` is defined, and a defined provider declares a route
 for the dialect its entries speak — both refuse the boot, not the first turn
-that would have hit the gap. A rolling-pointer model id (OpenRouter's
+that would have hit the gap. A third is asked at the composition root, because
+it is a fact about the binary rather than about the file: the dialect each
+provider's entries declare has to be one this build compiled a client for, and
+a provider whose entries declare *two* is refused as well — the registry holds
+one transport per provider name, so a provider serving both wires (OpenRouter
+serves `/responses` and `/messages`) is written down twice, under two names
+pointing at the same base URL. A rolling-pointer model id (OpenRouter's
 `~`-prefixed aliases) is refused at load for the same reason a duplicate
 identity is: it mis-prices every turn after the upstream re-points it. The key
 itself is never written here: `auth.env` only names the environment variable it
@@ -832,6 +1259,12 @@ explicitly, because each reaches something the default run must not assume:
   processes — see the command under *Hooking up Codex*. It is off by default and
   deliberately not enabled by the crate's own dev-dependency, so a developer with
   no `codex` on PATH gets an empty test binary rather than a failure to explain.
+- **The real `claude` binary**, the same way, under `--features e2e-claude`;
+  its chained tests additionally need `ROUNDHOUSE_TEST_RELAY_BIN`, and its two
+  closure tests a built launcher — `cargo build -p topham`, then
+  `ROUNDHOUSE_TEST_TOPHAM_BIN=$PWD/target/debug/topham`. That variable has no
+  `PATH` fallback: `topham` is installed nowhere, so a bare name would resolve
+  to whatever a developer happened to have.
 
 ## What the tests establish
 
@@ -939,26 +1372,101 @@ explicitly, because each reaches something the default run must not assume:
   context it admitted, a key revoked between runs stops the client, and the
   flat tool name codex resolves for a generated skill equals what
   `codex_launch` renders.
+- **A profile a person wrote reaches the wire** — a real `claude` launched by a
+  real `topham`, from hand-written TOML in an isolated configuration directory
+  and a child environment carrying no `ANTHROPIC_*` variable at all, arrives
+  with the turn key on its dedicated header, the sentinel inert and no bearer;
+  the same profile marked chained goes through `topham relay`'s own generated
+  wiring and preflight and arrives through Relay's gateway with all of that
+  intact. That is the link every other launch test leaves open: not that the
+  generated map works, but that something an operator can run produces it.
 
 ## Not yet built
 
 Roundhouse does not have WebSocket and gRPC transports. It cannot resume an
 interrupted generation from its partial output, which is already durable in the
-log. One real provider *dialect* is wired (`openai_responses`, which OpenRouter's
-GA `/responses` route also speaks, one registry client per configured
-provider); a chat-completions or Anthropic-messages client is a new
-`WireProtocol` arm the compiler will force through every exhaustive match, and
-neither exists yet. Fair-use enforcement is single-node: the rolling window
-counters live in process memory, and the Redis implementation is deferred by
-name with a boot warning where it matters.
+log. Two real provider *dialects* are wired — `openai_responses`, which
+OpenRouter's GA `/responses` route also speaks, and `anthropic_messages`, which
+OpenRouter's GA `/messages` route also speaks — with one registry client per
+configured provider, and the dialect read from each catalog entry. A
+chat-completions client is the one remaining `WireProtocol` arm with no
+transport; the composition root's dialect gate is an exhaustive `match`, so
+writing that client is a compile error there rather than a silent
+mis-dispatch. On the Anthropic wire roundhouse now serves as well as
+dispatches, and a real `claude` binary has driven it end to end on both
+topologies (the gated `claude_e2e` suite, the counterpart of `codex_e2e`) —
+what that surface still does not do is worth stating plainly. `/v1/models` is
+deliberately not served, so a client with gateway model discovery enabled sees
+no catalog:
+exposing roundhouse's routes in a user's `/model` picker is a product decision
+that has been deferred rather than made. Fair-use enforcement is shared across
+nodes now — the rolling buckets live in Redis where one is configured, judged
+by the same contract suite as the in-memory ledger — but a deployment with no
+Redis still counts in process memory, and says so at boot.
 
-The generated Codex launch config is a library function with no operator entry
-point — no CLI subcommand and no admin route produces it — and the MCP surface
-ignores the `_meta.threadId` a Codex client sends on every `tools/call`, because
-`init_session` is the client-agnostic path and reading `_meta` is a
-codex-native shortcut deferred to a plan of its own. The forwarded-ChatGPT-login
-stanza is exercised with a crafted `auth.json`; no real login has been forwarded
-through this code.
+The generated launch configuration now has an operator entry point — `topham`,
+above — and a launched Claude Code now reaches the `/mcp` mount as well as the
+Messages surface, proved by a real client dispatching a control call through a
+real `topham`. Three things around that are still stated rather than solved.
+**A control call chained through Relay is untested**: the direct closure run is
+the one that exists, and whether Relay's gateway leaves a second protocol's
+requests and their `Mcp-Session-Id` framing alone is a claim nothing here has
+made. **Chained codex is unproven**, because Relay splices
+`--config model_provider=…` onto the client's argv and a codex `--config`
+override outranks the generated `config.toml`, so the turn-key header that
+config names is not what the client presents; `topham plan` says so on that
+profile rather than refusing it, since the remedy (Relay's own
+`openai_auth_header`) is the fallback wiring the runbook records as deliberately
+untested. And a `RoundhouseKey` profile under an existing subscription login
+still asks once in an *interactive* session before the API key is used — the
+same gate that makes an interactive run ask before it will call an
+`mcp__roundhouse__*` tool at all, where a headless one is unblocked by
+`--allowedTools`. Both prompts are stated in `topham plan`'s output, not
+solved.
+
+The MCP surface reads the `_meta.threadId` a Codex client stamps on every
+`tools/call`. It resolves against a binding the Responses ingest wrote when it
+served that thread's own turn: codex carries the turn's thread id in its
+`x-codex-turn-metadata` header, so the session a thread is in is known exactly,
+per thread, and stays known across every fork of the cache key underneath it.
+That indirection is the correction M12.1's review forced. The value was first
+read as a `prompt_cache_key`, which it is — for a codex *root* thread and for
+nothing else: a root and every subagent it spawns share one session id and
+therefore one cache key, while each stamps its own thread id, so reading the id
+as a name missed exactly the subagents the feature exists for and answered them
+about their parent. The named path is still there behind the binding, as the
+route a root thread takes on a node that recorded none, and a thread id naming
+no conversation of the caller's falls through to the next correlator rather than
+reaching anyone else's session. Behind both sits a third correlator the same
+codex `_meta` was already carrying and nothing read until M14.1: the client's
+own session id in `x-codex-turn-metadata.session_id`, which *is* that turn's
+`prompt_cache_key`, resolved as a name. For a never-forked conversation the
+roundhouse session id is a pure function of the caller and that string, so a
+codex root thread resolves with no table consulted at all — and it is read
+after the thread binding precisely because a whole agent family shares the one
+value while each member stamps its own thread id.
+
+What is *not* exact: a thread whose binding has aged past its staleness bound,
+and a client that sends no such header — each of those lands on the `latest`
+guess, as it did before. A thread whose turns another *node* served is no
+longer on that list where a `ROUNDHOUSE_REDIS_URL` is configured: the
+generation, call and thread maps live in that Redis, so what one node bound is
+what every node reads, and a name no node has ever bound refuses rather than
+resolving to a superseded log. `latest` is deliberately not shared — two nodes
+serving one agent would each write their own answer to it and whichever wrote
+last would speak for both. Its Claude Code counterpart,
+`_meta["claudecode/toolUseId"]`, is read too and is a slightly different
+bargain: it carries an id *roundhouse emitted*, so it needs no cooperation from
+the model at all. What is unobserved is the Codex half's last
+mile: no run in this tree has yet seen a real `codex` dispatch a `tools/call`,
+because nothing here emits a tool call a codex client would route to MCP, so the
+threadId path is proved hermetically against a captured `_meta` shape rather
+than against the binary (`a_real_codex_binary_is_correlated_by_the_thread_id_it_stamps`
+is written and ignored, with both unlock conditions in its doc). The forwarded-ChatGPT-login stanza is exercised with a crafted
+`auth.json`; no real login has been forwarded through this code. The same is true of the Anthropic pass-through row that
+landed with the Messages client: the four headers it admits are asserted against
+a mock upstream on a real socket, and no real Claude subscription seat has been
+forwarded through it.
 
 Metrics are per-process: the recorder folds what this node served plus whatever
 it replayed from the sessions it opened. A fleet-wide view means either scraping

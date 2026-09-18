@@ -18,12 +18,20 @@ use roundhouse_core::item::{Item, ItemContent, Role};
 
 use crate::http::ApiError;
 
-/// The id of the one message item a response produces.
+/// The id of the `index`-th message item of a response, counting from zero.
 ///
-/// One assistant message per turn, so a fixed id is enough. The prefix is not
-/// decoration: a client discards an item id that has none, and an item it cannot
-/// name is an item it cannot attach deltas to.
-const MESSAGE_ITEM_ID: &str = "msg_1";
+/// **Per item rather than per response since M11.2**, where a fixed `msg_1` used
+/// to be enough: a turn that speaks, calls a tool and speaks again produces two
+/// message items, and two items sharing an id are two items a client cannot tell
+/// apart — it attaches deltas by this string.
+///
+/// The `msg_` prefix is not decoration: a client discards an item id that has
+/// none, and an item it cannot name is an item it cannot attach deltas to.
+/// Numbered from one on the wire so the first item keeps the `msg_1` every
+/// fixture in this repo already names.
+pub(super) fn message_item_id(index: usize) -> String {
+    format!("msg_{}", index + 1)
+}
 
 // ---------------------------------------------------------------------------
 // Canonicalizing a resent conversation
@@ -83,15 +91,23 @@ fn canonical_item(value: &Value) -> Result<Option<Item>, ApiError> {
                 response_id: None,
             }))
         }
-        "function_call" => Ok(Some(Item {
-            role: Role::Assistant,
-            content: ItemContent::ToolCall {
-                call_id: required_str(value, "call_id")?,
-                name: required_str(value, "name")?,
-                arguments: required_str(value, "arguments")?,
-            },
-            response_id: None,
-        })),
+        // **The `namespace` is carried into the item since M17 (R-N6), and the
+        // item `id` is still dropped.** The two look alike on the wire and are
+        // not alike at all: `id` names the *item* within one response and means
+        // nothing on a resend, while `namespace` names the MCP server the call
+        // was dispatched to and is half of what codex resolves a call against
+        // (`ToolName { name, namespace }`). Dropping it made a third party's
+        // tool named `status` indistinguishable from ours in the log, and made
+        // the outbound projection re-emit a call the client could not route.
+        //
+        // Carrying it does not move any turn id: `Item::render` leaves the
+        // field out, deliberately and with the reasoning stated there.
+        "function_call" => Ok(Some(Item::namespaced_tool_call(
+            required_str(value, "call_id")?,
+            required_str(value, "name")?,
+            optional_str(value, "namespace"),
+            required_str(value, "arguments")?,
+        ))),
         "function_call_output" => Ok(Some(Item {
             role: Role::Tool,
             content: ItemContent::ToolResult {
@@ -176,6 +192,20 @@ fn required_str(value: &Value, field: &str) -> Result<String, ApiError> {
         })
 }
 
+/// A string field that may be absent, as `None` when it is.
+///
+/// Separate from [`required_str`] rather than folded into it with a flag,
+/// because the two answer different questions about a malformed request: a
+/// missing `call_id` is a client bug worth a 422, while a missing `namespace`
+/// is the ordinary shape of a plain (non-MCP) function tool. A non-string value
+/// under the key reads as absent rather than as a refusal for the same reason
+/// the item `id` is ignored — this field is decoration to everything below the
+/// wire except the projection that puts it back, and refusing a turn over it
+/// would fail a conversation that is otherwise entirely well formed.
+fn optional_str(value: &Value, field: &str) -> Option<String> {
+    value.get(field).and_then(Value::as_str).map(str::to_string)
+}
+
 // ---------------------------------------------------------------------------
 // The turn id
 // ---------------------------------------------------------------------------
@@ -188,7 +218,7 @@ fn required_str(value: &Value, field: &str) -> Result<String, ApiError> {
 /// a new turn: a second answer, generated and billed, for a question already
 /// answered. Hashing the canonicalized conversation makes the retry identical to
 /// its original by construction, and the engine replays rather than regenerates.
-pub(super) fn turn_id_for(items: &[Item]) -> TurnId {
+pub(crate) fn turn_id_for(items: &[Item]) -> TurnId {
     // Renders concatenate unambiguously: `Item::render` prefixes `<|role|>`, so
     // every item is self-delimiting and no separator is needed to keep two
     // different conversations from hashing to one string. This is the same
@@ -238,28 +268,28 @@ pub(super) fn created_frame(response_id: &ResponseId) -> Event {
     )
 }
 
-pub(super) fn item_added_frame() -> Event {
+pub(super) fn item_added_frame(id: &str) -> Event {
     frame(
         "response.output_item.added",
-        json!({ "type": "response.output_item.added", "item": message_item("") }),
+        json!({ "type": "response.output_item.added", "item": message_item(id, "") }),
     )
 }
 
-pub(super) fn delta_frame(text: &str) -> Event {
+pub(super) fn delta_frame(id: &str, text: &str) -> Event {
     frame(
         "response.output_text.delta",
         json!({
             "type": "response.output_text.delta",
-            "item_id": MESSAGE_ITEM_ID,
+            "item_id": id,
             "delta": text,
         }),
     )
 }
 
-pub(super) fn item_done_frame(text: &str) -> Event {
+pub(super) fn item_done_frame(id: &str, text: &str) -> Event {
     frame(
         "response.output_item.done",
-        json!({ "type": "response.output_item.done", "item": message_item(text) }),
+        json!({ "type": "response.output_item.done", "item": message_item(id, text) }),
     )
 }
 
@@ -269,11 +299,11 @@ pub(super) fn item_done_frame(text: &str) -> Event {
 /// because of how a client handles the difference: an item whose type it knows
 /// but whose shape it cannot parse is dropped in silence, so the turn arrives
 /// looking empty rather than looking wrong.
-fn message_item(text: &str) -> Value {
+fn message_item(id: &str, text: &str) -> Value {
     json!({
         "type": "message",
         "role": "assistant",
-        "id": MESSAGE_ITEM_ID,
+        "id": id,
         "content": [{ "type": "output_text", "text": text }],
     })
 }
@@ -282,15 +312,130 @@ fn message_item(text: &str) -> Value {
 // A tool call this deployment emitted
 // ---------------------------------------------------------------------------
 
+/// The call, in the shape the pinned codex parser deserializes.
+///
+/// **Read from the oracle, not from the docs**: `ResponseItem::FunctionCall` at
+/// `6344a65` (`protocol/src/models.rs`) is `{type, name, arguments, call_id}`
+/// with an optional `id`, and `arguments` is a *string* holding JSON — its own
+/// comment says the Responses API returns it that way and that the client parses
+/// it later. That is also why [`ItemContent::ToolCall`] stores a string: the
+/// value crosses this boundary in both directions without a re-encoding, and a
+/// re-encoding would reorder an object's keys and stop matching what the client
+/// resends.
+///
+/// `id` is set to the call id rather than omitted, because a streaming consumer
+/// pairs `output_item.added` with its `done` on the item id, and two calls in
+/// one turn that shared one id would be indistinguishable.
+///
+/// **`namespace` is emitted when the stored call carries one and omitted
+/// otherwise** (M17, R-N10), which is not a guess about what the client wants
+/// but the field it sent coming back. Codex dispatches a call by an exact
+/// `ToolName { name, namespace }` registry lookup, so a namespaced call
+/// re-emitted flat — or bare — resolves against nothing there and the tool
+/// simply never runs. Omitted rather than sent as `null` because that is what
+/// the oracle's own encoder does (`skip_serializing_if = "Option::is_none"` on
+/// `ResponseItem::FunctionCall::namespace` @ the pin), and
+/// `codex_wire_shapes.rs` asserts this object against that encoder field for
+/// field rather than against a shape this module typed.
+///
+/// Public, and that is what makes the pin possible: the oracle suite is an
+/// integration test and cannot see a private helper, so the alternative was to
+/// assert the *frames* — and an axum [`Event`] is write-only, which is how this
+/// projection went unpinned through the whole of its life.
+pub fn function_call_item(
+    call_id: &str,
+    name: &str,
+    namespace: Option<&str>,
+    arguments: &str,
+) -> Value {
+    let mut item = json!({
+        "type": "function_call",
+        "id": call_id,
+        "call_id": call_id,
+        "name": name,
+        "arguments": arguments,
+    });
+    if let Some(namespace) = namespace {
+        item["namespace"] = json!(namespace);
+    }
+    item
+}
+
+/// The call announced, with its arguments still empty.
+///
+/// Empty deliberately, mirroring the upstream wire: the arguments stream in
+/// afterwards, and a consumer that acted on this frame's `arguments` would act
+/// on an empty object. The pinned parser turns this into `OutputItemAdded` and
+/// waits for the `done`.
+pub(super) fn call_added_frame(call_id: &str, name: &str, namespace: Option<&str>) -> Event {
+    frame(
+        "response.output_item.added",
+        json!({
+            "type": "response.output_item.added",
+            "item": function_call_item(call_id, name, namespace, ""),
+        }),
+    )
+}
+
+/// The whole of the call's arguments, as the one fragment this call has.
+///
+/// **The pinned codex parser ignores this event** — it sits in
+/// `process_responses_event`'s explicitly-unhandled arm at `6344a65` — so it is
+/// emitted for the other consumers of this dialect rather than for the oracle,
+/// and nothing downstream may depend on it. One fragment rather than several
+/// because the log holds the call whole: the dispatch decoder already
+/// reassembled it, and re-splitting it here would invent boundaries no upstream
+/// chose.
+pub(super) fn call_arguments_delta_frame(call_id: &str, arguments: &str) -> Event {
+    frame(
+        "response.function_call_arguments.delta",
+        json!({
+            "type": "response.function_call_arguments.delta",
+            "item_id": call_id,
+            "call_id": call_id,
+            "delta": arguments,
+        }),
+    )
+}
+
+/// The finished call. **This is the frame that makes it real.**
+///
+/// The pinned parser reads `ResponseItem` off `output_item.done` and only there;
+/// an item it cannot parse is dropped with a `debug!` and no error, so a turn
+/// whose call was malformed arrives looking like a turn that called nothing.
+pub(super) fn call_done_frame(
+    call_id: &str,
+    name: &str,
+    namespace: Option<&str>,
+    arguments: &str,
+) -> Event {
+    frame(
+        "response.output_item.done",
+        json!({
+            "type": "response.output_item.done",
+            "item": function_call_item(call_id, name, namespace, arguments),
+        }),
+    )
+}
+
 /// `response.completed`, which ends the stream.
 ///
 /// `id` and `total_tokens` are load-bearing: a client parses this event into its
 /// own accounting, and a completion it cannot parse is a turn it treats as
 /// failed. `cached_input_tokens` goes out as `input_tokens_details.cached_tokens`
 /// — the quantity this whole system exists to maximize, in the field a Responses
-/// client already reads. `cache_write_tokens` stays zero because no provider
-/// Roundhouse routes to reports it separately yet, and a number invented here
-/// would be billed as if it had been measured.
+/// client already reads.
+///
+/// `cache_write_tokens` is the log's own measurement now rather than the literal
+/// `0` this frame carried through M10. It is zero on every turn served over the
+/// Responses wire, because that dialect does not report a cache write at all —
+/// which is the honest reading, not a placeholder — and non-zero exactly when
+/// the turn was dispatched to an `anthropic_messages` provider that reported
+/// `cache_creation_input_tokens`. The field is read straight off [`Usage`] and
+/// never back-derived from `uncached_input_tokens()`: roundhouse *prices* every
+/// uncached token at the cache-write rate as a conservative approximation, and
+/// publishing that convention in a field named for a measurement is exactly the
+/// confusion the widened `Usage` exists to end.
 ///
 /// `reasoning_tokens` rides in `output_tokens_details` for the same reason it
 /// is stored that way: it is a component of `output_tokens`, not an addition
@@ -302,21 +447,33 @@ pub(super) fn completed_frame(response_id: &ResponseId, usage: &Usage) -> Event 
             "type": "response.completed",
             "response": {
                 "id": response_id,
-                "usage": {
-                    "input_tokens": usage.input_tokens,
-                    "input_tokens_details": {
-                        "cached_tokens": usage.cached_input_tokens,
-                        "cache_write_tokens": 0,
-                    },
-                    "output_tokens": usage.output_tokens,
-                    "output_tokens_details": {
-                        "reasoning_tokens": usage.reasoning_tokens,
-                    },
-                    "total_tokens": usage.total(),
-                },
+                "usage": completed_usage(usage),
             },
         }),
     )
+}
+
+/// The `usage` object of [`completed_frame`], as a value.
+///
+/// Split out because an [`Event`] is write-only — axum exposes no way to read a
+/// frame's payload back — so the projection from log axes to wire axes was only
+/// assertable through a whole turn over a socket, which is a test about six
+/// other things. Extracting it makes the one claim that matters here (each
+/// stored count lands in the field a Responses client reads, and none is
+/// invented) a unit test beside the code.
+fn completed_usage(usage: &Usage) -> Value {
+    json!({
+        "input_tokens": usage.input_tokens,
+        "input_tokens_details": {
+            "cached_tokens": usage.cached_input_tokens,
+            "cache_write_tokens": usage.cache_write_tokens,
+        },
+        "output_tokens": usage.output_tokens,
+        "output_tokens_details": {
+            "reasoning_tokens": usage.reasoning_tokens,
+        },
+        "total_tokens": usage.total(),
+    })
 }
 
 /// `response.incomplete`, which ends the stream.
@@ -358,248 +515,4 @@ pub(super) fn failed_frame(response_id: Option<&ResponseId>, message: &str) -> E
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn user(text: &str) -> Item {
-        Item::user_text(text)
-    }
-
-    fn assistant(text: &str) -> Item {
-        Item::assistant_text(text, ResponseId::new("resp_1"))
-    }
-
-    #[test]
-    fn the_turn_id_is_the_conversation_and_nothing_else() {
-        let conversation = vec![user("hello"), assistant("hi")];
-        assert_eq!(turn_id_for(&conversation), turn_id_for(&conversation));
-        assert_ne!(turn_id_for(&conversation), turn_id_for(&[user("hello")]));
-        // Two conversations that concatenate to the same text must not collide;
-        // the role prefix is what keeps them apart.
-        assert_ne!(
-            turn_id_for(&[user("ab")]),
-            turn_id_for(&[user("a"), user("b")])
-        );
-    }
-
-    #[test]
-    fn reasoning_is_dropped_and_unknown_items_are_refused() {
-        let items = canonicalize(
-            "be brief",
-            &[
-                json!({ "type": "reasoning", "summary": [] }),
-                json!({ "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "hi" }] }),
-            ],
-        )
-        .expect("reasoning is skipped rather than refused");
-        assert_eq!(items, vec![Item::system_text("be brief"), user("hi")]);
-
-        assert!(canonicalize("", &[json!({ "type": "web_search_call" })]).is_err());
-    }
-
-    /// A client's MCP tool call and the item the log keeps are the same call.
-    ///
-    /// **Inbound machinery, and M10.0 left it exactly where it was (T4).** The
-    /// outbound half is gone — no response projects a `function_call` frame any
-    /// more, so `EmittedCall` and its two builders were deleted with the steer
-    /// they existed for — but the *input* path still meets namespaced calls on
-    /// every turn, because a codex agent runs its own MCP tools between ours and
-    /// re-sends them in the history. Canonicalization must read neither the
-    /// `namespace` nor the item `id`, or the claimed prefix disagrees with the
-    /// stored one on the very next turn and the session rebinds to a cold
-    /// generation — silently, since every turn would still answer.
-    ///
-    /// The wire item is written out here rather than built by a projection,
-    /// which is what the deleted version did. That is a real loss and it is
-    /// named: the old test could not drift from what we emitted, because it
-    /// asked the emitter. This one is a fixture of what *codex* emits, so it is
-    /// pinned against a client instead — `codex_wire_shapes.rs` builds the same
-    /// shape from codex's own types, and that is where the fixture is kept
-    /// honest.
-    #[test]
-    fn a_clients_namespaced_call_canonicalizes_to_the_bare_stored_item() {
-        let wire = json!({
-            "type": "function_call",
-            "id": "fc_resp_03L",
-            "namespace": "mcp__roundhouse",
-            "name": "status",
-            "call_id": "call_03L",
-            "arguments": r#"{"conversation":"main"}"#,
-        });
-
-        let stored = canonicalize("", &[wire]).expect("a client's own call is resendable");
-        assert_eq!(
-            stored,
-            vec![Item::tool_call(
-                "call_03L",
-                "status",
-                r#"{"conversation":"main"}"#,
-            )],
-            "the wire's namespace and item id must leave no trace in the \
-             canonical item: {stored:#?}"
-        );
-    }
-
-    /// A namespace folded into `name` is part of the name, and canonicalization
-    /// does not split it back apart (F10).
-    ///
-    /// The corrected half of `dialect.rs`'s "why that direction" argument. That
-    /// module's earlier draft justified keeping the namespace out of the log by
-    /// claiming a namespaced resend and a flat resend already arrive as one
-    /// canonical item, because `canonical_item` ignores `namespace` and `id` on
-    /// the way in. It ignores a *separate* `namespace` field — which is what
-    /// makes `CodexResponses`'s own resend round-trip, asserted directly above
-    /// — and nothing more. No dialect emits the flat spelling today, so nothing
-    /// is broken; what was wrong was the reason, and a reason that does not hold
-    /// is what gets a future change waved through.
-    ///
-    /// Pinned as the divergence rather than deleted with the prose, because the
-    /// day a flat variant lands this is the assertion that has to be revisited
-    /// deliberately: making it pass means teaching `canonical_item` to split a
-    /// flat name apart, and that is a wire-layer change no dialect variant makes
-    /// the compiler ask for.
-    #[test]
-    fn a_flat_spelling_is_a_different_canonical_call_until_the_wire_learns_to_split_it() {
-        let namespaced = json!({
-            "type": "function_call",
-            "call_id": "call_1",
-            "namespace": "mcp__roundhouse",
-            "name": "fetch_steer",
-            "arguments": "{}",
-        });
-        let flat = json!({
-            "type": "function_call",
-            "call_id": "call_1",
-            "name": "mcp__roundhouse__fetch_steer",
-            "arguments": "{}",
-        });
-
-        let namespaced_item = canonicalize("", &[namespaced]).expect("namespaced form parses");
-        let flat_item = canonicalize("", &[flat]).expect("flat form parses");
-
-        assert_eq!(
-            namespaced_item,
-            vec![Item::tool_call("call_1", "fetch_steer", "{}")],
-            "a separate `namespace` field leaves no trace: this is the property \
-             the steering round trip rests on"
-        );
-        assert_eq!(
-            flat_item,
-            vec![Item::tool_call(
-                "call_1",
-                "mcp__roundhouse__fetch_steer",
-                "{}"
-            )],
-            "a namespace folded into `name` is kept verbatim, so the two \
-             spellings of one call are two canonical items"
-        );
-        assert_ne!(
-            namespaced_item, flat_item,
-            "if these ever agree, `canonical_item` has learned to split a flat \
-             name — which is the change a flat `ClientDialect` variant owes the \
-             input path, and `dialect.rs`'s module doc is the paragraph that has \
-             to be re-read when it lands"
-        );
-    }
-
-    /// The turn id of a fixed pre-M4-shaped conversation, pinned as a literal.
-    ///
-    /// The idempotency story rests on this hash being a pure function of the
-    /// conversation, stable across processes, machines, and releases: a client
-    /// retry hashes to the same turn and replays instead of paying twice. An
-    /// unchanged-code argument held that property through M4; a literal holds
-    /// it through every future change, because any edit to `Item::render`, the
-    /// FNV constants, or canonicalization that moves historical hashes fails
-    /// here first — and such an edit orphans every in-flight retry, so it must
-    /// be a decision, not a side effect.
-    #[test]
-    fn the_turn_id_of_a_fixed_conversation_is_pinned() {
-        let claimed = canonicalize(
-            "be brief",
-            &[
-                serde_json::json!({"type": "message", "role": "user", "content": "hello"}),
-                serde_json::json!({"type": "function_call", "call_id": "call_1",
-                                    "name": "search", "arguments": "{\"q\":\"rust\"}"}),
-                serde_json::json!({"type": "function_call_output", "call_id": "call_1",
-                                    "output": "3 hits"}),
-            ],
-        )
-        .expect("a fixed, well-formed conversation canonicalizes");
-        assert_eq!(turn_id_for(&claimed).to_string(), "turn_6a7aaa94e5b59fd2");
-    }
-
-    /// F18 (review): codex's `ResponseItem` enum has resendable variants far
-    /// beyond `message`/`function_call`/`function_call_output`/`reasoning` —
-    /// `tool_search_call`, `local_shell_call`, the three compaction shapes,
-    /// and more. None of them can appear in a v1 turn (no tool loop means no
-    /// tool_search/shell/compaction), so today's suite only ever resends the
-    /// four shapes above and never proves what `canonical_item` does with the
-    /// rest. This pins that boundary as documented, enumerated behavior: each
-    /// of these types must 422 with an error that *names the type*, so a
-    /// future tool-loop milestone that starts emitting one finds a named
-    /// failure instead of a silent behavior change.
-    #[test]
-    fn the_item_types_a_real_client_can_resend_are_named() {
-        let refused_types = [
-            "agent_message",
-            "local_shell_call",
-            "tool_search_call",
-            "tool_search_output",
-            "custom_tool_call",
-            "custom_tool_call_output",
-            "web_search_call",
-            "image_generation_call",
-            "compaction",
-            "compaction_trigger",
-            "context_compaction",
-        ];
-        for kind in refused_types {
-            let err = canonicalize("", &[json!({ "type": kind })])
-                .expect_err(&format!("`{kind}` must be refused, not silently dropped"));
-            let message = format!("{err:?}");
-            assert!(
-                message.contains(kind),
-                "error for `{kind}` does not name the type it refused: {message}"
-            );
-        }
-    }
-
-    #[test]
-    fn tool_items_canonicalize_to_the_call_and_its_result() {
-        let items = canonicalize(
-            "",
-            &[
-                json!({
-                    "type": "function_call",
-                    "call_id": "call_1",
-                    "name": "grep",
-                    "arguments": "{\"q\":\"x\"}",
-                }),
-                json!({ "type": "function_call_output", "call_id": "call_1", "output": "3 hits" }),
-            ],
-        )
-        .expect("both tool shapes are representable");
-        assert_eq!(
-            items,
-            vec![
-                Item {
-                    role: Role::Assistant,
-                    content: ItemContent::ToolCall {
-                        call_id: "call_1".into(),
-                        name: "grep".into(),
-                        arguments: "{\"q\":\"x\"}".into(),
-                    },
-                    response_id: None,
-                },
-                Item {
-                    role: Role::Tool,
-                    content: ItemContent::ToolResult {
-                        call_id: "call_1".into(),
-                        output: "3 hits".into(),
-                    },
-                    response_id: None,
-                },
-            ]
-        );
-    }
-}
+mod tests;

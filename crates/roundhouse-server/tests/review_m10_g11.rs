@@ -122,9 +122,11 @@ async fn a_provider_reported_price_survives_the_turn_that_earned_it() {
         .send(Ok(FrontierChunk::Done {
             input_tokens: 40,
             cached_input_tokens: 0,
+            cache_write_tokens: 0,
             output_tokens: 3,
             reasoning_tokens: 0,
             provider_reported_cost: Some(0.00421),
+            stop_reason: None,
         }))
         .await
         .unwrap();
@@ -224,9 +226,11 @@ async fn a_silent_provider_records_no_price_rather_than_zero() {
         .send(Ok(FrontierChunk::Done {
             input_tokens: 40,
             cached_input_tokens: 0,
+            cache_write_tokens: 0,
             output_tokens: 3,
             reasoning_tokens: 0,
             provider_reported_cost: None,
+            stop_reason: None,
         }))
         .await
         .unwrap();

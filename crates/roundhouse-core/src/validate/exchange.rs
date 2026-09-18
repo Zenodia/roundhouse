@@ -56,6 +56,18 @@ use crate::item::{Item, ItemContent};
 pub struct Exchange {
     pub call_id: String,
     pub name: String,
+    /// The MCP namespace the call carried, when its client spelled one.
+    ///
+    /// Carried through from
+    /// [`ItemContent::ToolCall::namespace`](crate::item::ItemContent) so the
+    /// one consumer that has to tell roundhouse's own control traffic from a
+    /// third party's identically-named tool —
+    /// [`is_control_call_on`](super::is_control_call_on) — can read it. It is
+    /// on the projection rather than looked up again at the fold because this
+    /// projection *is* the fold's view of the log: a second walk over the items
+    /// to recover one field would be the second answer to "what did this agent
+    /// just do" that this module's own header exists to prevent.
+    pub namespace: Option<String>,
     pub arguments: String,
     /// `None` for a call nothing has answered yet — the last call of a turn
     /// that is still running, or a steer the client has not fetched.
@@ -97,9 +109,11 @@ pub fn exchanges(items: &[Item]) -> Vec<Exchange> {
                 call_id,
                 name,
                 arguments,
+                namespace,
             } => exchanges.push(Exchange {
                 call_id: call_id.clone(),
                 name: name.clone(),
+                namespace: namespace.clone(),
                 arguments: arguments.clone(),
                 output: None,
                 failed: false,
@@ -119,87 +133,27 @@ pub fn exchanges(items: &[Item]) -> Vec<Exchange> {
                     call.output = Some(output.clone());
                 }
             }
-            ItemContent::Text { .. } => {}
+            // Neither a call nor its result, so there is nothing to pair.
+            //
+            // The arm worth arguing about is [`ItemContent::Opaque`], because
+            // some of what rides through it *is* a tool exchange —
+            // `server_tool_use` and the six server-tool result blocks. It is
+            // deliberately not folded in: those calls are made and answered by
+            // the *provider*, inside one turn, with no agent loop in between.
+            // The signals reading these exchanges — repeat detection,
+            // no-progress, the failure streak — all ask "is the agent going in
+            // circles", and a search the model ran twice inside one answer is
+            // not that. Counting it would fire a steer at an agent that has no
+            // way to act on the advice. Should a later milestone want that
+            // signal, the change is a typed variant per server-tool shape and
+            // an arm here, not a peek inside the opaque JSON.
+            ItemContent::Text { .. }
+            | ItemContent::Thinking { .. }
+            | ItemContent::RedactedThinking { .. }
+            | ItemContent::Opaque { .. } => {}
         }
     }
     exchanges
-}
-
-// ─── the agent's work, and our own control traffic ───────────────────────────
-
-/// The namespace codex flattens roundhouse's own MCP tools under.
-///
-/// The definition, not a copy: `roundhouse-server`'s
-/// `dialect::DEFAULT_MCP_NAMESPACE` re-exports this, and the server's rich doc
-/// about what an operator may rename lives there. It is stated *here* because
-/// the code that has to recognise a control call is below the server —
-/// [`ToolSignals`](super::ToolSignals) and the trigger's signals are in this
-/// crate and cannot see `roundhouse-server`. A second literal in this crate was
-/// the alternative and it fails in the direction that costs most: a rename
-/// would leave this classifier matching a name nothing emits, every control
-/// call would go back to reading as agent trouble, and nothing would be red.
-///
-/// **The one case this does not cover, stated rather than implied.** A
-/// deployment may set its own namespace (`ClientDialect`'s `namespace` field,
-/// written from file config in `control_config`), and this fold is pure — it
-/// takes a slice of exchanges and no deployment config. So a renamed
-/// deployment loses the exemption and gets today's behaviour back. Threading
-/// the dialect into the signal fold is what would close it, and it would put
-/// deployment configuration inside the one part of the validate loop that is a
-/// function of the session log alone. The unlock condition, for whoever wants
-/// it: a `SignalContext` carrying the dialect, passed everywhere
-/// `ToolSignals::from_exchanges` is called today.
-pub const CONTROL_TOOL_NAMESPACE: &str = "mcp__roundhouse";
-
-/// What codex puts between a namespace and a tool's own name.
-///
-/// `codex-mcp/src/mcp/mod.rs:78-81` @ `e363b08` builds the namespace as
-/// `mcp{DELIMITER}{server}{DELIMITER}` and `core/src/tools/handlers/mcp.rs:53`
-/// joins `{namespace}{DELIMITER}{name}`; [`CONTROL_TOOL_NAMESPACE`] is the
-/// `mcp{DELIMITER}{server}` half without the trailing delimiter.
-///
-/// One definition for two readers, which is the whole reason it is here rather
-/// than beside either of them: `codex_launch::skills` *renders* this join into
-/// every generated skill file, and this module has to *recognise* what comes
-/// back. Two literals could drift apart, and the drift is silent in both
-/// directions — a skill naming a tool codex cannot resolve, and a control call
-/// this classifier no longer recognises.
-pub const CONTROL_TOOL_DELIMITER: &str = "__";
-
-/// Whether this call is the agent talking to *us* rather than working on its
-/// task.
-///
-/// Matched on the namespace and the delimiter together, not on the namespace
-/// alone: a second MCP server called `roundhouse_extra` flattens to
-/// `mcp__roundhouse_extra__…`, which a bare `starts_with` would swallow into
-/// our own control traffic and quietly exempt somebody else's tools from every
-/// signal in the trigger.
-pub fn is_control_call(name: &str) -> bool {
-    name.strip_prefix(CONTROL_TOOL_NAMESPACE)
-        .and_then(|rest| rest.strip_prefix(CONTROL_TOOL_DELIMITER))
-        .is_some_and(|tool| !tool.is_empty())
-}
-
-/// The exchanges that are the agent working on its task.
-///
-/// **Roundhouse's own control calls are dropped, not re-categorised** (G04).
-/// Every signal in the trigger and every count in
-/// [`ToolSignals`](super::ToolSignals) asks a question about what the *agent*
-/// is doing, and an agent reading its own budget is not doing the task: a
-/// fifth `ToolCategory` would still leave `status`, `explain_last_route`,
-/// `prefer` and `set_quality_floor` inside the streaks, the windows and the
-/// depth that the signals are computed over — which is how four calls made
-/// because our own generated `rh-status` skill told the model to make them
-/// bought a judge side-call the session did not need.
-///
-/// A `Vec<&Exchange>` rather than a filtered clone because the outputs are
-/// whole tool results and this runs on the turn path; the borrowed view costs
-/// one pointer per call and the clone would cost the transcript.
-pub fn task_exchanges(exchanges: &[Exchange]) -> Vec<&Exchange> {
-    exchanges
-        .iter()
-        .filter(|exchange| !is_control_call(&exchange.name))
-        .collect()
 }
 
 /// The tool's own answer, with a codex wrapper header removed if it wrote one.
@@ -518,6 +472,76 @@ mod tests {
         assert_eq!(
             exchanges(&steered)[0].output.as_deref(),
             Some("re-read the task")
+        );
+    }
+
+    /// **A call *roundhouse* emitted is the agent's ordinary work, and pairs
+    /// like any other (M11.2).**
+    ///
+    /// Until this milestone every `ToolCall` in a log arrived as a client's
+    /// resent history: the model's calls reached no durable item at all, so the
+    /// signals reading these exchanges only ever saw work the agent had already
+    /// done elsewhere. A dispatched turn now commits its own calls as it
+    /// produces them, which puts three new shapes in front of this extractor —
+    /// a call stamped with a response id, a call interleaved with the assistant
+    /// text of the same turn, and a call that is *unanswered because the turn
+    /// that made it has only just ended*.
+    ///
+    /// The last one is the reason this is worth asserting rather than assuming.
+    /// `output: None` already meant "nothing has answered this", and the
+    /// repeat and no-progress signals are computed over answered exchanges — so
+    /// the freshly emitted call must read as pending rather than as a call that
+    /// failed, and the *previous* one must read as answered the moment the
+    /// client brings its result back.
+    #[test]
+    fn a_call_this_deployment_emitted_pairs_with_the_clients_result() {
+        let stamped = |call_id: &str, name: &str, arguments: &str| Item {
+            response_id: Some(ResponseId::new("resp_1")),
+            ..call(call_id, name, arguments)
+        };
+        // One agent turn, exactly as the log holds it: the answer's prose
+        // split around the call it made, then the client's result, then the
+        // next turn's call still in flight.
+        let items = vec![
+            Item::user_text("find main"),
+            Item::assistant_text("Let me look.", ResponseId::new("resp_1")),
+            stamped("toolu_01", "Grep", r#"{"pattern":"fn main"}"#),
+            result("toolu_01", "src/main.rs:1: fn main() {"),
+            Item {
+                response_id: Some(ResponseId::new("resp_2")),
+                ..call("toolu_02", "Read", r#"{"path":"src/main.rs"}"#)
+            },
+        ];
+
+        let paired = exchanges(&items);
+        assert_eq!(paired.len(), 2, "{paired:#?}");
+        assert_eq!(paired[0].call_id, "toolu_01");
+        assert_eq!(paired[0].name, "Grep");
+        assert_eq!(
+            paired[0].output.as_deref(),
+            Some("src/main.rs:1: fn main() {"),
+            "the client's unstamped result answers the stamped call it names"
+        );
+        assert!(!paired[0].failed);
+        assert_eq!(
+            paired[1].output, None,
+            "a call the client has not run yet is pending, not failed"
+        );
+        assert!(
+            !paired[1].failed,
+            "an unanswered call must not read as a failure, or a turn that has \
+             just emitted one starts a failure streak against itself"
+        );
+
+        // The assistant text around the call is neither a call nor a result,
+        // which is what keeps the interleaving invisible to these signals.
+        assert_eq!(
+            exchanges(&[Item::assistant_text(
+                "Let me look.",
+                ResponseId::new("resp_1")
+            )])
+            .len(),
+            0
         );
     }
 

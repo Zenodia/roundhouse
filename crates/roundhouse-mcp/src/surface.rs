@@ -40,17 +40,127 @@ use roundhouse_core::control::Principal;
 
 use crate::overlay::{OverlayScope, PreferMode};
 
+/// Who is calling, and from where in their own conversation.
+///
+/// **Two kinds of fact that arrive together and are needed together.** The
+/// principal is resolved by the transport from the same
+/// `Authorization: Bearer rh_turn_…` header the turn surfaces use, so a tool can
+/// never be called without one and never has to ask whose deployment it is
+/// looking at. The correlators are the other half of the same question: *which*
+/// of that principal's conversations this call belongs to — weighed by
+/// [`ControlReads::resolve_session`](crate::reads::ControlReads::resolve_session),
+/// which is where that ruling lives and the only place it is stated.
+///
+/// **Why no correlator is a tool argument** (M12, R-M2; M12.1, R-M7; M14.1,
+/// R-C5). None of them is something the model chose to say — all three are
+/// protocol metadata the *client* attaches on `params._meta`: one naming the
+/// `tool_use` block roundhouse itself emitted (`claudecode/toolUseId`), one
+/// naming the thread the client is running (`threadId`), and one carrying the
+/// client's own session id, which is the turn's `prompt_cache_key`
+/// (`x-codex-turn-metadata.session_id`). Putting any of them in the arguments
+/// schema would invite a model to invent one, and `deny_unknown_fields` would
+/// then refuse the call of a client that sent it honestly.
+#[derive(Debug, Clone)]
+pub struct Caller {
+    principal: Principal,
+    correlators: Correlators,
+}
+
+impl Caller {
+    /// A caller who attached no correlator at all — a client sending neither
+    /// `_meta` key, and either client on a call made from outside a turn.
+    pub fn new(principal: Principal) -> Self {
+        Self {
+            principal,
+            correlators: Correlators::default(),
+        }
+    }
+
+    /// A caller carrying whichever correlators its client attached.
+    ///
+    /// **One [`Correlators`] rather than a builder taking one at a time**
+    /// (M12.1 review, F5). The builder existed to stop two adjacent
+    /// `Option<String>` parameters being transposed — the correlators are
+    /// weighed in a fixed order, so a swap at the door would compile and
+    /// silently invert the ruling — and a struct with named fields makes that
+    /// swap unspellable for the same reason, without a second vocabulary for
+    /// one pair of strings.
+    pub fn correlated(principal: Principal, correlators: Correlators) -> Self {
+        Self {
+            principal,
+            correlators,
+        }
+    }
+
+    pub fn principal(&self) -> &Principal {
+        &self.principal
+    }
+
+    pub fn correlators(&self) -> &Correlators {
+        &self.correlators
+    }
+}
+
+/// The correlators a client attached to a `tools/call`, before anything has
+/// been looked up.
+///
+/// **One struct, carried from [`crate::tools::ToolCall`] through [`Caller`] to
+/// the seam, and not two parameters at each hop.** The seam would otherwise
+/// take three adjacent `Option<&str>` — a name, a thread and a call — which is
+/// three ways to transpose an argument into a different ruling with nothing
+/// red. Named fields make the transposition unspellable.
+///
+/// Owned rather than borrowed: this is what the transport read off the wire and
+/// what every hop after it carries, so a lifetime here would buy one avoided
+/// clone per tool call and cost a parameter on four types.
+#[derive(Debug, Clone, Default)]
+pub struct Correlators {
+    /// `_meta.threadId` — the conversation the *client* says it is running
+    /// (M12.1, R-M7). Codex stamps it on every `tools/call` and it is the
+    /// turn's `prompt_cache_key`, so it resolves as a **name** through the
+    /// caller's own namespace.
+    pub thread_id: Option<String>,
+    /// `_meta["claudecode/toolUseId"]` — the `tool_use` block this call is
+    /// answering (M12, R-M2). It resolves as a **call**, through the table of
+    /// ids this deployment emitted — durable and shared since M14.1
+    /// (R-C4), rather than kept by whichever node happened to stream it.
+    pub tool_use_id: Option<String>,
+    /// `_meta["x-codex-turn-metadata"].session_id` — the client's own session
+    /// id, which is the `prompt_cache_key` its turns carry (M14.1, R-C5). It
+    /// resolves as a **name**, through the caller's own namespace, exactly as
+    /// [`Self::thread_id`] does on the arm behind the thread binding.
+    ///
+    /// **Named `cache_key` rather than `session_id`, deliberately.** In this
+    /// deployment a `SessionId` is roundhouse's own id for a log, and this is
+    /// the *client's* id for its conversation; a field that borrowed the name
+    /// would read, at every hop, as though it already were the answer. What it
+    /// actually is is the string `ControlPlane::qualify` turns into that
+    /// answer, which is what "cache key" means everywhere else here.
+    ///
+    /// What it buys is narrow and worth stating narrowly: for a codex *root*
+    /// thread this is the same string as [`Self::thread_id`], which the thread
+    /// arm's own name lookup already resolved, so nothing changes there. It is
+    /// the member whose thread id is nobody's cache key and whose binding the
+    /// deployment does not hold — never recorded, or aged out — that this
+    /// catches, and it catches it as the *family's* conversation rather than
+    /// as `latest`, which for an agent family is a coin toss between its
+    /// members. The ordering behind the thread binding is what keeps a
+    /// subagent whose binding *is* held from being answered about its parent.
+    pub cache_key: Option<String>,
+}
+
 /// Everything an MCP client can ask of a roundhouse deployment.
 ///
-/// `principal` is resolved by the transport from the same `Authorization:
-/// Bearer rh_turn_…` header the turn surfaces use, so a tool can never be
-/// called without one and never has to ask whose deployment it is looking at.
+/// Every method takes a [`Caller`] rather than a bare `Principal`: which
+/// conversation a session-scoped tool concerns is answered from *both* halves
+/// of it, and a signature that carried only the principal is what made
+/// `latest` the only answer available (R-M2).
 #[async_trait]
 pub trait ControlSurface: Send + Sync + 'static {
     /// What this key may be routed to right now, and what is left to spend.
     async fn status(
         &self,
-        principal: &Principal,
+        caller: &Caller,
         request: StatusRequest,
     ) -> Result<ToolOutcome, SurfaceError>;
 
@@ -60,49 +170,49 @@ pub trait ControlSurface: Send + Sync + 'static {
     /// asked to keep rather than a header.
     async fn init_session(
         &self,
-        principal: &Principal,
+        caller: &Caller,
         request: InitSessionRequest,
     ) -> Result<ToolOutcome, SurfaceError>;
 
     /// Record what the agent is trying to do. Changes no routing.
     async fn declare_intent(
         &self,
-        principal: &Principal,
+        caller: &Caller,
         request: DeclareIntentRequest,
     ) -> Result<ToolOutcome, SurfaceError>;
 
     /// Ask for local, frontier, or neither, for a while.
     async fn prefer(
         &self,
-        principal: &Principal,
+        caller: &Caller,
         request: PreferRequest,
     ) -> Result<ToolOutcome, SurfaceError>;
 
     /// Raise the quality floor this session's turns are routed under.
     async fn set_quality_floor(
         &self,
-        principal: &Principal,
+        caller: &Caller,
         request: SetQualityFloorRequest,
     ) -> Result<ToolOutcome, SurfaceError>;
 
     /// Re-read the correction roundhouse last put in this conversation.
     async fn fetch_steer(
         &self,
-        principal: &Principal,
+        caller: &Caller,
         request: FetchSteerRequest,
     ) -> Result<ToolOutcome, SurfaceError>;
 
     /// Say what happened to a steer. Advisory; never blocks anything.
     async fn report_outcome(
         &self,
-        principal: &Principal,
+        caller: &Caller,
         request: ReportOutcomeRequest,
     ) -> Result<ToolOutcome, SurfaceError>;
 
     /// The last routing decision for this conversation, agent-readable.
     async fn explain_last_route(
         &self,
-        principal: &Principal,
+        caller: &Caller,
         request: ExplainLastRouteRequest,
     ) -> Result<ToolOutcome, SurfaceError>;
 }
@@ -113,7 +223,7 @@ pub trait ControlSurface: Send + Sync + 'static {
 
 /// Which conversation a session-scoped tool concerns.
 ///
-/// The client's own `prompt_cache_key`, resolved through the same
+/// The client's conversation name (`thread-id`, then `session-id`, then `prompt_cache_key`), resolved through the same
 /// `bound_session` namespacing the Responses surface uses, so the two surfaces
 /// agree by construction. Omitted, it means the principal's most recent
 /// session — which is the right default for the overwhelmingly common case of
@@ -324,7 +434,7 @@ pub struct OverlayResponse {
 /// M5 ships the write half: an id is minted, recorded against
 /// `(principal, session)`, and returned in a form a client will keep. Nothing
 /// in the deployment *reads* it back — `mcp_api::resolve_session` answers from
-/// the client's `prompt_cache_key` and from the node's conversation table, and
+/// the client's conversation name and from the node's conversation table, and
 /// never from a binding. The read side is M7's, per the plan's §3. Both this
 /// type's [`Self::note`] and the tool description are written to match: they
 /// ask the client to keep the token and say what keeping it makes possible,
@@ -517,6 +627,18 @@ pub enum SurfaceError {
     NoSession,
     #[error("conversation `{0}` does not belong to this key")]
     ForeignConversation(String),
+    /// The caller's own two inputs name two different conversations.
+    ///
+    /// **A refusal and never a precedence rule** (M12.1, R-M7); why, and why
+    /// both conversations are named back, is stated once on
+    /// [`ControlReads::resolve_session`](crate::reads::ControlReads::resolve_session),
+    /// the code that raises this.
+    #[error(
+        "this call names conversation `{named}` but the client correlated it to `{correlated}`; \
+         roundhouse will not choose between a caller's own contradictory inputs -- send one or \
+         make them agree"
+    )]
+    ContradictoryConversation { named: String, correlated: String },
     #[error("conversation `{0}` has not been routed yet")]
     NotRoutedYet(String),
     #[error("the control plane could not answer: {0}")]
@@ -526,5 +648,60 @@ pub enum SurfaceError {
 impl From<anyhow::Error> for SurfaceError {
     fn from(error: anyhow::Error) -> Self {
         SurfaceError::Internal(error.to_string())
+    }
+}
+
+#[cfg(test)]
+mod review_m12_1_f5 {
+    /// This file's own source, so the guard below reads what a reader would
+    /// read rather than a constant that could drift from what it checks.
+    const FULL_SOURCE: &str = include_str!("surface.rs");
+
+    /// [`FULL_SOURCE`] up to (not including) this test module. Reading the
+    /// whole file would be a tautology here: this module's own doc comments
+    /// quote the very patterns they check for, so a naive `.matches(...)`
+    /// would count its own prose. Slicing before `mod review_m12_1_f5` is the
+    /// same fix `lib.rs`'s guard module uses for the identical self-reference
+    /// problem.
+    fn source() -> &'static str {
+        FULL_SOURCE
+            .split("\n#[cfg(test)]\nmod review_m12_1_f5")
+            .next()
+            .unwrap()
+    }
+
+    /// M12.1 review, F5: `ToolCall`, `Caller` and `Correlators` were three
+    /// spellings of one pair of correlator fields, joined by a builder whose
+    /// two methods carried the identical empty-string filter.
+    ///
+    /// The finding's own `how_to_prove` recipe (`grep -c 'tool_use_id:
+    /// Option'` "drops from 3 to 1") was retired rather than kept: run
+    /// literally it counted 4, because the pattern also matched `answering`'s
+    /// parameter declaration. What survives is the claim the recipe was
+    /// reaching for — one struct spells the pair, and the empty-string filter
+    /// is applied once, at the transport door where `_meta` is read, rather
+    /// than once per correlator.
+    #[test]
+    fn the_correlator_pair_is_spelled_once_and_filtered_once() {
+        assert_eq!(
+            source().matches("tool_use_id: Option").count(),
+            1,
+            "`Correlators` is meant to be the only struct in this file \
+             spelling the correlator pair; a second one is F5 growing back"
+        );
+        let filter = ".filter(|id| !id.is_empty())";
+        assert_eq!(
+            source().matches(filter).count() + include_str!("tools.rs").matches(filter).count(),
+            0,
+            "the empty-string normalisation belongs at the one door the ids \
+             enter by; a copy here or on the dispatch path is the duplication \
+             F5 found"
+        );
+        assert_eq!(
+            include_str!("transport.rs").matches(filter).count(),
+            1,
+            "and it has to still be applied there, once, or an empty `_meta` \
+             value becomes a lookup key that can only miss"
+        );
     }
 }

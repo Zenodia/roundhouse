@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Plan: frontier-only model selection, the text steer, and the Switchyard benchmark (M10)
 
-> **Status: proposed design.** Direction set by the product owner on
+> **Status: M10.0–M10.2 shipped; D1 ruled (2026-09-02); D2 ruled (2026-09-03); D3 ruled (2026-09-04).** Originally: proposed design. Direction set by the product owner on
 > 2026-08-22: intercept codex and model-select per Switchyard guidance,
 > frontier models only at first — mimic a user on a sol-only session with a
 > fraction of calls rerouted to terra/luna, then swap the source so sol maps
@@ -372,3 +372,326 @@ One build-order note recorded for honesty: PR #10 (the ToolSignals port)
 was merged into the M9 branch after #6 had already squash-merged, so its
 content never reached `main`; the M10 implementation branch re-lands the
 approved commit by cherry-pick and its PR says so.
+
+## Addendum (2026-09-02): D1 — the state-spectrum ruling
+
+R10 deferred the state question to a design round and named its shape: a
+declared mode spectrum — P0 proxy, P1 ephemeral, P2 durable — and a ruling
+on how much of Relay's proxy posture to adopt rather than rebuild, made
+against a working stateless-shaped path rather than a thought experiment.
+The round ran on the tree at `7c5369a`, after M10.0–M10.2, the Anthropic
+Messages surface (M11), the MCP control surface with its correlation tables
+(M12, M12.1) and the Redis fair-use ledger (M13). Three evidence documents
+carry it, every claim pinned and independently re-derived:
+
+- `research/roundhouse-state-inventory-7c5369a.md` — twenty pieces of state
+  in nine families, which promise each serves, what breaks on a restart and
+  on a second node, and the minimum durable set that closes the M12.1
+  handoffs.
+- `research/nemo-relay-0.8.2-proxy-posture.md` — what Relay keeps, where,
+  for which promise, and what it deliberately does not keep.
+- `research/client-carried-state-codex-6344a65-claude-2.1.257.md` — what a
+  node can know from one request alone, for both clients on both surfaces.
+
+**R11 — P0 is not a mode roundhouse ships.** Under a proxy that keeps no
+log, four promises are not degraded but deleted: replay and audit (the
+Relay-format exports are cold replays of a finished session), exact settle
+(the settle is re-driven by the replay a session performs when next opened;
+with no log, a process dying between dispatch and settle leaves spend never
+applied), drift reconciliation (definitionally the ledger's `committed_usd`
+against the log's `measured_usd`), and steering as it exists since M10.0
+(the correction is a conversation item; P0 would move it back out of the
+log). Three more degrade to a stated guess: prefix admission has nothing to
+compare a resent history against, so fork detection and the warm-prefix
+premise behind routing warmth lose their trigger, and idempotent retry
+across a reconnect becomes "run the turn again, bill twice". What survives
+intact — auth, tenancy, the routing decision, fair use, grants,
+pass-through credentials, the MCP tool shape — is Relay's product, which
+exists, and which roundhouse already hands off to under the S3 topology.
+The product sentence says roundhouse *owns the turn*; a mode that owns
+nothing between requests is a second Relay, not a roundhouse. So the
+spectrum collapses to two shipped modes: **P1 ephemeral**, today's
+no-Redis default — one node, process state, the memory store, a restart
+survived by refusal and re-derivation and never by a guess — and **P2
+durable**, Redis behind everything that has a durable implementation. P0's
+*disciplines* are adopted piecemeal under R14; P0 as a mode is closed.
+
+**R12 — one switch, and it widens to the three correlation maps.**
+`ROUNDHOUSE_REDIS_URL` set means every family with a durable implementation
+uses it — sessions, spend, fair use (R-F3′), and, once built, the three
+maps the inventory names as the minimum that closes the M12.1 handoffs:
+generations (`{project}/{user}/{key}` → generation), calls
+(`(principal, tool_use_id)` → session or ambiguous) and threads
+(`(principal, thread_id)` → session). Nothing is chosen by a second
+predicate; the M13 review showed what a second predicate costs. Two rows
+stay node-local by contract: `latest`, whose whole contract is "a guess,
+weighed as one", and which durability would make more confident without
+making more correct; and `ControlStore`'s four families, whose loss widens
+to the ceiling and never past it and whose durable shape is M8's ruling.
+The maps live in the store crate beside the spend and fair-use ledgers,
+with a shared contract the memory implementation passes first (the M13
+pattern), and the three properties already written as decisions in
+`conversations.rs` are the contract: partitioned by principal, an ambiguous
+call remembered rather than forgotten, a thread rebinding where a call
+collides. The hot-path cost is resolved rather than accepted: a generation
+is read through the store only on a node's first touch of a key and written
+through on a fork, so the common turn stays a local lookup and the round
+trip is spent exactly where a restart or a second node would otherwise
+guess. With a durable map, M12.1's "never bound on this node refuses" keeps
+its condition and widens its scope — never bound *anywhere* refuses — which
+is the answer to the inventory's last open question.
+
+**R13 — the fork arm admits, in every mode.** Handoff (a) has a cause and a
+symptom, at different prices. The cause is a re-derived generation; R12
+removes it. The symptom is independent of the mode and wrong on its own
+terms: the fork arm appends the claimed history whole on the premise that a
+forked-to session "is empty and so agrees trivially", and discards the
+store's already-existed answer that would have said otherwise. A forked-to
+session is admitted like any other — its log is compared with the claim,
+an agreeing log continues, a disagreeing one forks again, and a bounded
+number of disagreements refuses loudly rather than looping. This is
+well-defined, test-first, and ships alone before R12.
+
+**R14 — what to adopt from Relay's posture, and what not.** Adopted, each
+as a shipped decision rather than a re-litigation: a *staleness* bound on
+the call and thread tables beside the capacity bound they have (Relay bounds
+correlation state by TTL and turn boundary; a binding older than any
+plausible turn is a stale guess whatever the table's size); a declared
+tenancy namespace and a schema version folded into every shared-store key,
+rejected when empty; refuse-if-foreign process arbitration — file lock,
+owner record, ready file — for `topham` wherever it manages a local
+process; and the degradation of a shared-store outage *recorded as a typed
+reason*, never swallowed. Not adopted: correlation by hint scoring
+(roundhouse binds exact ids it emitted or the client stamped, and refuses
+on ambiguity rather than weighing it); a loopback-only single process as
+the deployment shape; and fail-open on a shared store as a blanket rule —
+right for Relay's response cache, wrong for a ledger. The ledger posture is
+split and stated: a check against a configured ceiling that cannot reach
+its store fails *closed*, refusing the turn with the retryable error an
+outage calls for, because a ceiling that cannot be checked cannot be
+honoured and the operator configured it on purpose; a draw already made
+that cannot be recorded fails *open* with the reason logged, because a
+bounded under-count is a fact about the outage and a wrong refusal is not.
+The engine's fair-use seam already has this shape; M13.1 pins it.
+
+**R15 — the admin directory is the next durability gap, and it is not
+D1's.** The inventory found one restart loss that corrupts a *surviving*
+store: losing an archived project's tombstone from the memory directory
+lets the id be recreated and silently joins the new tenant to the old one's
+spend in the Redis ledger that did survive — a hazard that appears exactly
+when a deployment upgrades from P1 to P2 partially. A durable
+`DirectoryStore` is M8-owned and carries its own placement question; D1
+records that it is the first gap after the three maps, and that until it
+closes, the Redis-arm boot warning is the honest statement of it.
+
+**What D1 leaves open, by name.** Whether `_meta["x-codex-turn-metadata"]
+.session_id` — the cache key, on every codex control call, unread today —
+should be read so a codex `status` needs no table at generation zero; it is
+cheap and exact, and it belongs with M14.1 where the generation map makes
+it whole. Whether the metrics fold gets an aggregator across nodes, which
+is the dashboard's P2 question and not a correlation one. And whether
+Relay's fail-open-with-deadline is the right posture for the *response
+cache* roundhouse does not have — moot until it does.
+
+The rungs this opens are recorded in `PLAN-anthropic-messages.md`, where
+the loop that drives this branch lives: M14.0 (R13), M14.1 (R12), M14.2
+(R14's bounds and key discipline), and the ledger posture folded into
+M13.1.
+
+## Addendum (2026-09-03): D2 — the durable admin directory, ruled
+
+R15 named the admin directory as the first durability gap after the three
+correlation maps and left its placement question to M8. D2 is that round,
+run on the tree at `1b85d64` after M14.2 and M15, with two evidence
+documents, every claim pinned and independently re-derived:
+
+- `research/roundhouse-admin-directory-1b85d64.md` — what the directory
+  stores, how it changes, what a restart breaks and what a second node
+  would, the two placements and their unwritten costs, and what a durable
+  store must guarantee that no other family does.
+- `research/stored-control-call-namespace-1b85d64.md` — the second D2
+  question; ruled in `PLAN-anthropic-messages.md`, where R-M1 lives.
+
+**R16 — the contract moves to core as a versioned document; the records
+stay beside the resolver.** The two placements the deferral note wrote
+down both cost something the evidence makes exact: moving the records to
+`roundhouse-core` drags the file's whole config vocabulary with them (every
+record *wraps* a `ProjectEntry`, `UserEntry`, `KeyEntry`, and those wrap
+budgets, policies and windows), and landing the implementation in the
+server crate either re-spells a key format R-S3 just made singular or
+widens the store crate's private machinery to one outside caller. Neither
+is what the trait actually needs. `DirectoryStore`'s shape is already
+`load` / `commit(expected_version, records)` / `version` over the *whole*
+`DirectoryRecords`, which is what makes `DeleteMembership`'s cascade one
+commit by construction — so what the store persists is one document, and
+a document needs no vocabulary. The contract lands in core as a versioned
+*opaque document* store — `load() -> Versioned<bytes>`,
+`commit(expected_version, bytes) -> version`, `version()` — with the
+memory implementation and a contract suite beside the other three families,
+and `roundhouse-store-redis` implements it as a fifth `KeyFamily::Directory`
+under one key with a Lua compare-and-set, the key machinery staying
+`pub(crate)`. `ControlDirectory`, its records, `KeyScope`, the compiler and
+the cross-checks stay in the server crate exactly where `control/mod.rs`'s
+note says a key record belongs; the typed `DirectoryStore` the directory
+calls becomes an adapter that serializes at the boundary, and the note gains
+a dated amendment saying so — the record stayed next to the resolver, its
+*bytes* did not need to. The records take `Serialize` (the "first mechanical
+step" the deferral named), and the document is JSON under the log's own
+discipline: additive fields with defaults, one top-level document version
+for the day that is not enough, and a pinned byte-for-byte round-trip test
+the way `a_pre_m11_log_record_still_deserializes` pins an item.
+
+**R17 — the seam lands first, alone, and is judged under the memory
+store.** `DirectoryStore` becomes async and `Managed::compiled` stops
+compiling under the write guard — compile into a fresh value, then swap it
+in under a lock held only long enough to publish — as one rung with no
+Redis in it, because it is a behaviour-preserving change to a path the
+existing directory tests already exercise, and because landing the trait
+change with the Redis implementation would put the one round trip every
+TTL-driven refresh costs on every concurrent admission. The rung's own
+guard is the one the deferral note implies: a refresh whose `load` stalls
+must not hold an admission that only needs the current plane.
+
+**R18 — one switch, and it now widens to the directory; a directory the
+store cannot read refuses the boot.** `ROUNDHOUSE_REDIS_URL` set means the
+directory is durable too (R12's rule, unchanged). The boot re-orders so the
+backends open before the directory compiles when the variable is set, and
+the directory's first `load` from Redis *is* the boot check, as constructing
+it is today: a Redis that serves sessions but refuses the directory read
+refuses the boot with the reason named, on the ledger posture R14 stated —
+a check that cannot reach its store fails closed, because the operator
+configured tenancy on purpose. With that, the memory-backed `Shared` branch
+no longer exists, so `control_plane_file_configured` and the boot warning it
+gates are deleted rather than moved (the note at `main.rs:703-710` said
+"move"; there is nowhere left to move it to), the ignored
+`recreating_an_archived_project_after_a_restart_inherits_its_spend` goes
+live with its stale line numbers corrected, and the `ControlDirectory`
+deferral note becomes a dated record of what landed.
+
+**R19 — node divergence is recorded, never refused, and reported once.**
+A durable store makes two states reachable for the first time: two nodes
+compiling different planes from identical records because the file, the
+cross-checks and the TTL are per-process, and a mutation validated on node
+A that node B cannot compile. The writer stamps the document with a
+fingerprint of its own inputs — the control-plane file's hash, and the
+catalog and fleet identities the cross-checks were built from — and a
+reader whose own fingerprint differs *warns with a typed reason naming what
+differs, once per stored version rather than once per TTL, and keeps
+serving the plane it can compile*. Refusing would make a rolling file
+change impossible (node A has the new file, node B not yet), and refusing
+silently is the failure R14 forbade. A compile failure on B keeps the last
+good plane, as today, but records the version it could not take beside the
+version it serves; that pair is the first row of a per-node status surface
+roundhouse does not yet have, deferred by name with the audit trail rather
+than invented here.
+
+**What D2 leaves open, by name.** Un-archive: durable tombstones are its
+precondition, not its answer, and the keys-refused-while-closed question is
+as open as M8 left it. The audit trail and key rotation, which need an
+identity `KeyScope::Admin` deliberately lacks. MCP-overlay durability
+(`roundhouse_mcp::ControlStore`'s four maps) and the sealed credential
+store, which R16's document contract can carry as sibling documents but
+which are separate rungs with separate questions — the overlay maps are
+per-session and swept, and a credential document needs the key it is sealed
+under. And whether a per-node status surface exists at all, which R19 needs
+and nothing else yet does.
+
+The rungs this opens are recorded in `PLAN-anthropic-messages.md`, where
+the loop that drives this branch lives: M16.0 (R17), M16.1 (R16, R18,
+R19), and M17 (the stored namespace, R-N1..R-N5).
+
+## Addendum (2026-09-04): D3 — the dashboard across nodes, and the node that can say what it is
+
+D1 left one question open by name — "whether the metrics fold gets an
+aggregator across nodes, which is the dashboard's P2 question" — and D2's
+R19 recorded a served-and-refused version pair "for the node-status surface
+roundhouse does not yet have". With the directory durable (M16) and the
+namespace carried (M17), D3 rules on both, on the tree at `1d016f2`. Two
+evidence documents carry the dashboard half and the status half, every
+claim pinned and independently re-derived:
+
+- `research/roundhouse-dashboard-across-nodes-1d016f2.md` — what the fold
+  holds and how it is fed, which dashboard numbers are node-local, what the
+  shared ledger already answers, what the session store cannot enumerate,
+  the time leg nothing measures, and the three shapes a cross-node
+  aggregate could take with what each costs.
+- `research/unarchive-admin-identity-and-node-status-1d016f2.md` — its
+  §6–§9: what a node can say about itself today, that no route reports any
+  of it, and Relay 0.8.2's health probe as the precedent.
+
+**R20 — the dashboard says what it is before it says more.** Every number
+on the dashboard is one process's fold, and the page renders "since the
+first event this process folded" as if it were the deployment's window,
+with no node identity anywhere on it; in Configured mode no browser can
+read it at all, because the page's own fetch sends no key. The honest
+number ships first and is cheap: the page names the node, the tenure and
+the shared-backend arm it runs under, qualifies its window as this
+process's, and can be read under a configured plane. A node gains a
+configured, restart-stable name (`ROUNDHOUSE_NODE_NAME`, defaulting to the
+per-tenure id) beside the per-tenure id the lease keeps — two identities
+with two jobs: the lease's must be unique per live engine, the report's
+must survive a restart so two tenures of one machine do not read as two
+nodes.
+
+**R21 — the time leg is measured before the deployment is.** The product
+sentence claims function, cost and time co-optimised, and the dashboard
+measures two of the three: no observed TTFT is folded or published on any
+node, though the engine states it is derivable from the log's own
+timestamps. A deployment-wide number for a leg nobody measures on one node
+is the claim unmeasured twice. TTFT joins the fold's vocabulary from the
+events already in the log — the fold's first read of a text delta against
+the turn's start — as a per-target latency column carrying its basis, under
+the same fold-equivalence test the other columns answer to.
+
+**R22 — the deployment aggregate keeps identity until the sum.** Of the
+three shapes the evidence priced, one is forbidden by the surface's own
+contract (a poll must not cost the store a replay, and no session census
+exists to replay from) and one is unsound as stated: a durable fold state
+per node, merged at read, double-counts by construction, because a failover
+replays a session's whole log into the second node's fold and the
+identity that would let a merge deduplicate was discarded when events
+became sums. The shape that is sound keeps the fold's own unit of
+idempotency, the session: a shared row per session holding that session's
+fold-to-date at its sequence number, written set-if-newer and never added
+to, so a replay writes what is already there; scope totals maintained by
+atomic delta against that row, so the running sum is exact by the same
+argument the fair-use ledger's running sums are; and the snapshot built
+from summed counters below the pricing walk, never from merged snapshots —
+the reference model a local model is priced against is inferred from the
+scope's own traffic, so two nodes' finished snapshots are not commensurable
+and the deployment's must be chosen from the deployment's traffic. The
+non-sums merge as what they are: the declared baseline as its three-state
+lattice, the window as min and max, the session count as the rows. It is
+published beside the node's fold under its own stamp — the reconciliation
+view's precedent for a second accumulator — and the fold stays the node's
+own truth. The cost is one script write per turn at the turn's terminal
+event, and the product owner is told so; it is not free, and it is the
+only shape that is right.
+
+**R23 — a node reports itself on two routes, the way Relay does.** No
+route on any of the six routers reports directory status, divergence,
+regression or node identity, and `status()` has no caller outside its own
+tests. Relay 0.8.2's health probe is the precedent worth taking whole: an
+unauthenticated identity probe answering what the process is — service,
+version, node name, tenure — that a launcher can gate readiness on and a
+foreign process is refused by, and an authenticated detail read carrying
+what R19 recorded and what this round adds: the served lineage and version
+(the status type omits the lineage today, so two nodes' served versions are
+not comparable — that is fixed here), the refused version, the divergence,
+the last regression, the shared-backend arm, and the fold's window. The
+detail read is a product surface and its exact shape is the product
+owner's; the split is the ruling, because a probe that discloses version
+state to an unauthenticated caller and a probe a launcher cannot reach are
+the two failures the split avoids.
+
+**What D3 leaves open, by name.** Whether the aggregate's per-session row
+lives as long as the session's log or is pruned with the fold's own
+retention, which is the one number the R22 rung has to choose. Whether the
+dashboard's deployment view is the default view or a second one beside the
+node's — a product call once both exist. And the session census the store
+lacks: R22's rows imply a per-project index of sessions, which is also what
+a replay or an operator listing would need, and which nothing else in the
+tree has asked for yet.
+
+The rungs this opens are recorded in `PLAN-anthropic-messages.md`, where
+the loop that drives this branch lives.

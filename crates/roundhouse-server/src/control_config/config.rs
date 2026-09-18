@@ -41,7 +41,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use roundhouse_core::control::credential::access::ProviderKeys;
 use roundhouse_core::control::{
@@ -66,7 +67,7 @@ use super::validate::ValidateConfig;
 /// to a typo is unrestricted routing, and a dropped `budget` is unlimited
 /// spend. None of those is visible from any read surface afterwards, so the
 /// only place the mistake can be caught is the load that made it.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectEntry {
     pub id: String,
@@ -142,7 +143,7 @@ pub struct ProjectEntry {
 /// misspelt `capible` would resolve to an empty tier — which is not an error,
 /// because an empty tier is a legitimate one-sided recipe, and would therefore
 /// route every turn to the other tier forever with nothing anywhere saying why.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TiersConfig {
     /// Ordered [`Target::policy_identity`](roundhouse_core::routing::Target::policy_identity)
@@ -186,7 +187,7 @@ impl TiersConfig {
 /// beside `id` — a display name, a team, an email — is a field this shape does
 /// not have, and accepting them silently would let a whole vocabulary
 /// accumulate in a file that reads none of it.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UserEntry {
     pub id: String,
@@ -199,7 +200,7 @@ pub struct UserEntry {
 /// its project's whole policy — the widest reading of the entry, produced by
 /// the one kind of mistake nothing downstream can distinguish from an operator
 /// who meant it.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct KeyEntry {
     pub project: String,
@@ -251,7 +252,7 @@ pub struct KeyEntry {
 /// decided by which `to_*` conversion below is called, not by two parallel
 /// structs that would drift apart the first time a field is added to one and
 /// not the other.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PolicyConfig {
     pub min_quality: Option<f64>,
@@ -408,22 +409,25 @@ pub struct ControlPlaneConfig {
     /// `KeyScope::Admin` acts on the deployment, not from inside a project.
     #[serde(default)]
     pub admin_keys: Vec<String>,
-    /// The namespace this deployment's synthetic tool calls are rendered
-    /// under, or `None` for
-    /// [`DEFAULT_MCP_NAMESPACE`](crate::dialect::DEFAULT_MCP_NAMESPACE).
+    /// Retired: a deployment that sets this is refused at load.
     ///
-    /// Deployment-wide rather than per-project, and that is a claim rather
-    /// than a simplification: the namespace has to match what the *client's*
-    /// MCP registration calls this server, and one deployment serves one
-    /// endpoint, so a per-project namespace would be a name no project could
-    /// make its own agent use. It sits in this file because this is where a
-    /// deployment already names the things its clients say back to it — the
-    /// keys they present and the session namespace their conversations are
-    /// qualified into.
+    /// Parsed only so it can be *named* in the refusal. Dropping the field
+    /// would make an operator's `mcp_namespace` line unknown-key noise (or,
+    /// worse, silently ignored), and the one thing this knob must never do
+    /// again is load quietly.
     ///
-    /// Read through [`ControlPlane::client_dialect`](super::ControlPlane::client_dialect)
-    /// and nowhere else, so an open deployment and a configured one answer the
-    /// same question in one place.
+    /// **Why it went** (M12 review, F2). It was accepted, validated and
+    /// documented as reaching `ClientDialect` — and reached no runtime path at
+    /// all. Every place that actually spells the namespace reads
+    /// [`DEFAULT_MCP_NAMESPACE`](crate::dialect::DEFAULT_MCP_NAMESPACE): both
+    /// launchers' MCP registrations, the Claude signage, and the validate
+    /// fold's recognizer a crate below, which cannot see this file. So an
+    /// operator who set `mcp_namespace: "mcp__acme"` got a config that loaded
+    /// and validated, a launcher that still registered `roundhouse`, signage
+    /// that still said `mcp__roundhouse__*`, and a fold that still recognised
+    /// only `mcp__roundhouse__*`. A refusal that names the constant is the
+    /// honest answer; a pre-1.0 config surface may lose a field that never
+    /// worked.
     #[serde(default)]
     pub mcp_namespace: Option<String>,
     /// What arm assignment is hashed against, deployment-wide.
@@ -547,11 +551,12 @@ pub enum ControlPlaneError {
     )]
     DuplicateHash { path: String, key_sha256: String },
     #[error(
-        "control-plane config `{path}`: `mcp_namespace` is `{namespace}` -- it must be \
-         non-empty and free of whitespace, because it is matched by an agent's exact \
-         tool-name lookup and a namespace nothing can name emits calls nothing can dispatch"
+        "control-plane config `{path}`: `mcp_namespace` is set to `{namespace}`, and the knob \
+         is retired -- the MCP namespace is `mcp__roundhouse` by construction, shared by both \
+         launchers' registrations, the signage and the validate fold's recognizer, and a \
+         configured value never reached any of them. Remove the field"
     )]
-    BadMcpNamespace { path: String, namespace: String },
+    RetiredMcpNamespace { path: String, namespace: String },
     #[error(
         "control-plane config `{path}`: {entry}'s min_quality {min_quality} is outside \
          0.0..=1.0"
@@ -848,13 +853,41 @@ impl ControlPlaneConfig {
     }
 
     pub fn load(path: impl AsRef<Path>) -> Result<Self, ControlPlaneError> {
+        Self::load_fingerprinted(path).map(|(config, _)| config)
+    }
+
+    /// The same load, also answering the SHA-256 of the bytes it read, hex
+    /// (M16.1, R-D9).
+    ///
+    /// **The bytes and not the parsed config**, which is the whole reason this
+    /// is one function rather than a hash taken later: two files that parse to
+    /// the same configuration are the same deployment intent, and what a node
+    /// comparing fingerprints wants to know is whether the stored directory
+    /// was written by a node holding *this document*. A hash of a re-read of
+    /// the path would answer about a file that may have been edited since, and
+    /// a hash of a canonical re-serialization would need this type to derive
+    /// `Serialize` for storage's benefit — which would then be a second
+    /// vocabulary the file's `deny_unknown_fields` no longer guards.
+    ///
+    /// One read, hashed on the way through, so the digest and the config can
+    /// never describe two different files.
+    pub fn load_fingerprinted(path: impl AsRef<Path>) -> Result<(Self, String), ControlPlaneError> {
         let path = path.as_ref();
         let display = path.display().to_string();
-        let json = std::fs::read_to_string(path).map_err(|source| ControlPlaneError::Read {
+        let bytes = std::fs::read(path).map_err(|source| ControlPlaneError::Read {
             path: display.clone(),
             source,
         })?;
-        Self::from_json(&json, &display)
+        let sha256 = hex::encode(Sha256::digest(&bytes));
+        // Answered as a read failure rather than a parse failure: a file this
+        // process cannot decode as text never reached `serde_json` at all, and
+        // reporting it as malformed JSON would send an operator hunting for a
+        // syntax error in a file whose problem is its encoding.
+        let json = String::from_utf8(bytes).map_err(|error| ControlPlaneError::Read {
+            path: display.clone(),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, error),
+        })?;
+        Ok((Self::from_json(&json, &display)?, sha256))
     }
 
     /// Refuse a config that cannot resolve a presented key to exactly one
@@ -1162,6 +1195,7 @@ impl ControlPlaneConfig {
             turn_keys.insert(
                 key.key_sha256.clone(),
                 Admission {
+                    request_context: None,
                     principal: Principal::new(key.project.clone(), key.user.clone()),
                     policy: Arc::new(project_policy.narrow(&overrides)),
                     budget,
@@ -1180,15 +1214,14 @@ impl ControlPlaneConfig {
             );
         }
 
-        // Rejected at the boundary rather than trimmed or defaulted at the
-        // projection: a namespace that is empty or carries whitespace renders
-        // a call an agent's exact lookup can never match, so the turn would
-        // complete and the steer would silently do nothing. An operator-authored
-        // name that means nothing must fail to load, not fail to work.
-        if let Some(namespace) = &self.mcp_namespace
-            && (namespace.is_empty() || namespace.chars().any(char::is_whitespace))
-        {
-            return Err(ControlPlaneError::BadMcpNamespace {
+        // Refused at the boundary rather than ignored at the projection (M12
+        // review, F2). The knob was validated and documented for two milestones
+        // while reaching no runtime path, so an operator who set it got a
+        // deployment that behaved as though they had not. A config that loads
+        // and then quietly means nothing is worse than one that refuses: the
+        // second is one line to fix, the first is a debugging session.
+        if let Some(namespace) = &self.mcp_namespace {
+            return Err(ControlPlaneError::RetiredMcpNamespace {
                 path: path.to_string(),
                 namespace: namespace.clone(),
             });

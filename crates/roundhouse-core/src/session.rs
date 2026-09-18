@@ -19,7 +19,7 @@ use crate::event::{
     SessionObserver, Usage, ValidationOutcome,
 };
 use crate::ids::{ResponseId, SessionId, TurnId};
-use crate::item::Item;
+use crate::item::{Item, Role};
 use crate::routing::{CacheLedger, DecisionRecord, DispatchAttempt, ProviderPricing, Target};
 use crate::store::{Lease, SessionStore, StoreError};
 use crate::validate::{Arm, EscalationOverrides, SteerAction};
@@ -203,9 +203,124 @@ pub struct TerminalSettlement {
     pub provider_reported_cost_usd: Option<f64>,
 }
 
+/// Whether one committed item is *turn configuration* rather than history.
+///
+/// The distinction M11.1's review forced into the model (finding F7). A client
+/// that resends its whole conversation every turn resends two different kinds
+/// of thing in one list: the conversation, which is what happened and which the
+/// server already holds, and the instruction block the client re-derives on
+/// every invocation from the date, the working directory, the git branch and
+/// whichever betas are enabled today. Treating the second as history means an
+/// ordinary `--continue` forks its own session the first time any of those
+/// moves, which is the one turn a warm prefix was supposed to pay off on.
+///
+/// **The role is the marker, and it is assigned once — at canonicalization —
+/// by position.** A dialect that has a leading system run maps that run to
+/// [`Role::Developer`] and leaves every *interior* system message a
+/// [`Role::System`] item of the conversation, so nothing downstream ever has to
+/// re-derive where configuration ended: a run of identical-looking system items
+/// is not splittable by any later reader, which is exactly the ambiguity this
+/// encoding removes. See `messages_api::wire::canonicalize`.
+///
+/// The stamp check is belt and braces rather than decoration: everything on the
+/// input path arrives unstamped, so a stamped item is one *this* deployment
+/// emitted, and no emitted item is ever a client's configuration.
+pub fn is_turn_configuration(item: &Item) -> bool {
+    item.role == Role::Developer && item.response_id.is_none()
+}
+
+/// How many leading items of `items` are turn configuration.
+pub fn turn_configuration_len(items: &[Item]) -> usize {
+    items
+        .iter()
+        .take_while(|item| is_turn_configuration(item))
+        .count()
+}
+
+/// Where a session's turn configuration ends, as items are folded in.
+///
+/// **One rule, two readers**, which is the whole reason this is a type and not
+/// two loops: the session's own projection ([`SessionState::items`], what the
+/// prompt is rebuilt from) and the serve surfaces' prefix-admission projection
+/// (`prefix_admission::bind_prefix`) have to agree byte for byte about what the
+/// session contains, or admission checks a conversation the model never sees.
+///
+/// The rule: a turn's input may open with a run of configuration items, and
+/// that run **replaces** whatever configuration the session was holding,
+/// in place at the head. Everything else is appended as history. So a session
+/// whose client rewrote one line of its system prompt ends up with one system
+/// prompt — the new one, at the front, where a prompt belongs — rather than two
+/// copies of it with the stale one first.
+///
+/// Append-only is preserved and that is the point of doing it here: nothing is
+/// rewritten in the log. The log holds both runs and the *projection* resolves
+/// them, exactly as it already resolves a `ResponseIncomplete` into "that
+/// partial was provisional". The alternative considered and rejected was a new
+/// `SessionEventKind` carrying the replacement: it would have given this fold,
+/// the wire layer's projection and the context assembler a second item-carrying
+/// kind to keep in agreement, which the `ItemAppended` arm below already
+/// explains is how a session starts forking on the first site that forgets one.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ConfigurationCursor {
+    len: usize,
+    /// Whether the item folded most recently was part of *this turn's* leading
+    /// configuration run.
+    ///
+    /// Reset by [`Self::turn_started`] rather than inferred from the items,
+    /// because two consecutive turns that each carry only configuration (a
+    /// client retrying with a rewritten system prompt and nothing new to say)
+    /// are otherwise indistinguishable from one turn carrying twice as much —
+    /// and the second reading appends the new run beside the old one instead of
+    /// over it.
+    in_run: bool,
+}
+
+impl ConfigurationCursor {
+    /// A turn's input is about to be folded in.
+    pub fn turn_started(&mut self) {
+        self.in_run = false;
+    }
+
+    /// Place one appended item into `items`.
+    pub fn append(&mut self, items: &mut Vec<Item>, item: Item) {
+        if !is_turn_configuration(&item) {
+            self.in_run = false;
+            items.push(item);
+            return;
+        }
+        if !self.in_run {
+            // The first configuration item of a turn retires the whole of the
+            // previous set. Retiring it item by item — keeping the ones that
+            // happen to match — would leave a session holding a prefix of one
+            // system prompt and a suffix of another, which is a prompt nobody
+            // wrote.
+            items.drain(..self.len);
+            self.len = 0;
+            self.in_run = true;
+        }
+        items.insert(self.len, item);
+        self.len += 1;
+    }
+
+    /// How many leading items of the folded list are configuration.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
 /// State derived from the event log.
 #[derive(Default)]
 pub struct SessionState {
+    /// The canonical conversation: this session's turn configuration, then its
+    /// history.
+    ///
+    /// Not simply "every appended item in log order" — see
+    /// [`ConfigurationCursor`] for why a turn's leading configuration run lands
+    /// at the head rather than where it was appended.
     pub items: Vec<Item>,
     pub ledger: CacheLedger,
     /// Number of turns started so far; the index the next turn will use.
@@ -214,6 +329,9 @@ pub struct SessionState {
     completed_turns: HashMap<TurnId, CompletedTurn>,
     /// Turn ids currently in flight.
     open_turns: HashMap<TurnId, ResponseId>,
+    /// Where [`Self::items`]'s configuration run ends. See
+    /// [`ConfigurationCursor`].
+    configuration: ConfigurationCursor,
     /// Routing facts of responses that have not terminated yet.
     ///
     /// `Routed` is committed before execution, so it records an intent rather
@@ -466,7 +584,12 @@ impl SessionState {
                 // for the life of the session. The fact is taken off
                 // `ValidationDecided` instead, which is the one event that says
                 // a steer happened.
-                self.items.push(item.clone());
+                //
+                // Placed through the cursor rather than pushed, which is the
+                // one thing that is *not* plain append order here: a turn's
+                // leading configuration run replaces the session's, at the
+                // head. See [`ConfigurationCursor`].
+                self.configuration.append(&mut self.items, item.clone());
             }
             SessionEventKind::TurnStarted {
                 turn_id,
@@ -474,6 +597,10 @@ impl SessionState {
             } => {
                 self.turn_index += 1;
                 self.open_turns.insert(turn_id.clone(), response_id.clone());
+                // The configuration run is per turn: the items about to be
+                // folded in are this turn's admitted input, and its leading
+                // configuration items — if it has any — are a replacement.
+                self.configuration.turn_started();
             }
             SessionEventKind::Routed {
                 response_id,
@@ -1237,7 +1364,49 @@ impl<S: SessionStore> Session<S> {
             .ok_or_else(|| SessionError::ResponseNotOpen(response_id.clone()))
     }
 
-    /// Close a response successfully, committing the assistant item.
+    /// Commit something this response produced *before* it terminates.
+    ///
+    /// **The append that makes an interleaved answer possible, and it is a
+    /// deliberate weakening of the atomicity [`Self::complete_with_item`]
+    /// describes.** A turn that speaks and then calls two tools produces three
+    /// items whose *order* is the answer: a client resends exactly the blocks it
+    /// was given, and the prefix check compares that resend against what this
+    /// log holds — so items committed in a different order from the one they
+    /// were streamed in fork every tool-using session on its second turn.
+    /// Batching them into the completion cannot preserve that order on the wire,
+    /// because the text ahead of a call has already gone out as deltas by the
+    /// time the call arrives.
+    ///
+    /// So an emitted item lands when it is produced, exactly as
+    /// [`Self::append_output`]'s deltas do, and the same guarantee applies to
+    /// both: a response that dies mid-generation leaves durable output behind
+    /// and terminates through [`Self::mark_incomplete`]. What it must never
+    /// leave behind is an emitted item and *no* terminal event, which is why
+    /// this is reachable only between `begin_turn` and a terminal — and the
+    /// trailing run still rides the completion batch, so the ordinary prose
+    /// turn's atomicity is exactly what it was.
+    ///
+    /// The response id is stamped here rather than read off `item`, for the
+    /// reason [`Self::complete_with_item`] gives: a stamp is a claim that *this
+    /// deployment emitted this*, and a caller that had to supply it could forget
+    /// it — a forgotten stamp is an emitted call no projection can tell from a
+    /// client's own.
+    pub async fn append_emitted(
+        &mut self,
+        response_id: &ResponseId,
+        item: Item,
+    ) -> Result<(), SessionError> {
+        self.commit(vec![SessionEventKind::ItemAppended {
+            item: Item {
+                response_id: Some(response_id.clone()),
+                ..item
+            },
+        }])
+        .await?;
+        Ok(())
+    }
+
+    /// Close a response successfully, committing what it produced last.
     ///
     /// The dispatched turn's spelling of [`Session::complete_with_item`], and
     /// expressed in terms of it rather than beside it: the atomicity rule — the
@@ -1251,19 +1420,40 @@ impl<S: SessionStore> Session<S> {
     /// and absent from [`Self::complete_with_item`] because only a *dispatched*
     /// turn can have one: the other spelling completes a turn an interjector
     /// answered, which reached no provider at all and so has no bill to report.
+    /// `stop_reason` is the provider's own word for why it stopped, and travels
+    /// for the reason its field documents — nothing downstream of the fold can
+    /// recover it.
+    ///
+    /// **`trailing` is an [`Option`] since M11.2, and the `None` is
+    /// load-bearing.** A turn whose whole answer was tool calls has already
+    /// committed every item it produced through [`Self::append_emitted`], and
+    /// completing it with an empty assistant text item would put a block in the
+    /// log that was never on the wire — so the client's next resend would
+    /// diverge from the stored history at exactly that item and fork the
+    /// session. `Some("")` is still the right call for a turn that produced
+    /// *nothing*, because that is what the serve surfaces emit for one; the
+    /// distinction is the caller's and is made where the answer's shape is
+    /// known.
+    ///
+    /// Text rather than an `Item`, because the item a completion commits is
+    /// assistant text by construction: a tool call is complete when it is
+    /// produced and lands through [`Self::append_emitted`] at that moment, so it
+    /// can never be the thing a turn is still holding when it ends.
     pub async fn complete(
         &mut self,
         response_id: &ResponseId,
-        text: impl Into<String>,
+        trailing: Option<&str>,
         usage: Usage,
         provider_reported_cost_usd: Option<f64>,
+        stop_reason: Option<String>,
     ) -> Result<(), SessionError> {
         self.commit_completion(
             response_id,
-            Item::assistant_text(text, response_id.clone()),
+            trailing.map(|text| Item::assistant_text(text, response_id.clone())),
             usage,
             ControlRecord::default(),
             provider_reported_cost_usd,
+            stop_reason,
         )
         .await
     }
@@ -1279,10 +1469,12 @@ impl<S: SessionStore> Session<S> {
     /// **The response id is stamped here rather than read off the item.** That
     /// is what makes a committed item bearing a response id mean "this response
     /// emitted it": everything on the input path arrives through
-    /// [`Session::begin_turn`] carrying none, and this is the only method that
-    /// puts one on anything at all. A caller that had to supply the stamp
-    /// itself could forget it, and a forgotten stamp is an emitted call that no
-    /// projection can tell from a client's own.
+    /// [`Session::begin_turn`] carrying none, and the only methods that put one
+    /// on anything at all are this and [`Session::append_emitted`] — the two
+    /// spellings of *emitting*, both of which stamp rather than accept a stamp.
+    /// A caller that had to supply the stamp itself could forget it, and a
+    /// forgotten stamp is an emitted call that no projection can tell from a
+    /// client's own.
     ///
     /// **One append batch, never two.** The item and the completion are a
     /// decision and its realization. Committed separately, a process that died
@@ -1320,11 +1512,12 @@ impl<S: SessionStore> Session<S> {
         usage: Usage,
         record: ControlRecord,
     ) -> Result<(), SessionError> {
-        // `None`, and it is a claim rather than a default: this spelling exists
-        // for the turn an interjector answered, which dispatched nothing, so
-        // there is no upstream to have reported a price. The dispatched turn's
-        // spelling one method up is the one that carries a figure.
-        self.commit_completion(response_id, item, usage, record, None)
+        // `None` twice, and both are claims rather than defaults: this spelling
+        // exists for the turn an interjector answered, which dispatched nothing,
+        // so there is no upstream to have reported a price and none to have
+        // named a stop reason. The dispatched turn's spelling one method up is
+        // the one that carries either.
+        self.commit_completion(response_id, Some(item), usage, record, None, None)
             .await
     }
 
@@ -1333,21 +1526,26 @@ impl<S: SessionStore> Session<S> {
     async fn commit_completion(
         &mut self,
         response_id: &ResponseId,
-        item: Item,
+        item: Option<Item>,
         usage: Usage,
         record: ControlRecord,
         provider_reported_cost_usd: Option<f64>,
+        stop_reason: Option<String>,
     ) -> Result<(), SessionError> {
-        let item = Item {
-            response_id: Some(response_id.clone()),
-            ..item
-        };
         let mut kinds = record.into_kinds();
-        kinds.push(SessionEventKind::ItemAppended { item });
+        if let Some(item) = item {
+            kinds.push(SessionEventKind::ItemAppended {
+                item: Item {
+                    response_id: Some(response_id.clone()),
+                    ..item
+                },
+            });
+        }
         kinds.push(SessionEventKind::ResponseCompleted {
             response_id: response_id.clone(),
             usage,
             provider_reported_cost_usd,
+            stop_reason,
         });
         self.commit(kinds).await?;
         Ok(())

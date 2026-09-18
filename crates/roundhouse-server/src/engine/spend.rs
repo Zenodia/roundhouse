@@ -285,6 +285,17 @@ impl<S: SessionStore, T: Tokenizer + Clone> Engine<S, T> {
 /// never reached a provider, and a genuinely free rate card is free. A frontier
 /// dispatch whose decision recorded no card at all is none of those — see
 /// [`EngineError::UnpricedSettlement`].
+///
+/// **One turn at a time, and the metrics rollup agrees with it by
+/// construction.** What this returns is summed into `Account::committed_usd`,
+/// while `/v1/metrics` prices the same turns out of its own fold — two routes
+/// to one number, and the admin reconciliation view publishes their difference
+/// as evidence about *settlement*. They stayed equal only while pricing was
+/// linear in tokens, which M11.0's measured cache-write split ended: the fold
+/// now accumulates each turn's own split (`routing::PooledUsage`) instead of
+/// summing tokens and pricing once, so a drift is again a settle that failed,
+/// a restart, or a turn still in flight, and never an artifact of where the
+/// arithmetic happened (M11.0 review F2).
 pub(super) fn settled_cost_usd(settlement: &TerminalSettlement) -> Result<f64, EngineError> {
     match (&settlement.target, &settlement.rate_card) {
         // Order matters: a local dispatch is free whatever a card says, and a
@@ -309,6 +320,7 @@ mod tests {
         Usage {
             input_tokens: 0,
             cached_input_tokens: 0,
+            cache_write_tokens: 0,
             output_tokens: 1_000_000,
             reasoning_tokens: 0,
             accounting: Accounting::Reported,
@@ -504,6 +516,7 @@ mod the_live_admission_cannot_move_a_finished_turns_charge {
         Usage {
             input_tokens: 0,
             cached_input_tokens: 0,
+            cache_write_tokens: 0,
             output_tokens: 1_000_000,
             reasoning_tokens: 0,
             accounting: Accounting::Reported,
@@ -512,6 +525,7 @@ mod the_live_admission_cannot_move_a_finished_turns_charge {
 
     fn budgeted_admission(budget_counts: BudgetCounts) -> Admission {
         Admission {
+            request_context: None,
             principal: Principal::new("acme", "ada"),
             policy: Arc::new(TurnPolicy::unrestricted()),
             budget: Some(BudgetTerms {
@@ -607,7 +621,7 @@ mod the_live_admission_cannot_move_a_finished_turns_charge {
             .await
             .unwrap();
         session
-            .complete(&response_id, "hi", frontier_usage(), None)
+            .complete(&response_id, Some("hi"), frontier_usage(), None, None)
             .await
             .unwrap();
 
