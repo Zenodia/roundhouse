@@ -77,6 +77,15 @@ local-tier use cases in one PR, and does not foreclose the tighter options. Opti
 acceptable temporary workaround if a local-tier demo is needed before the Rust work is
 scheduled.
 
+*2026-09-23: Implemented, as Option A, as `HttpLocalExecutor` in
+`crates/roundhouse-server/src/local_fleet.rs`. One deviation from the sketch above worth
+recording: it drives `/v1/completions` (a raw token-id-array prompt) rather than
+`/v1/chat/completions`, because `LocalExecutor::execute`'s `prompt_tokens: &[u32]` are the exact
+ids the KV-block hashes were computed over — a chat-completions text request would let the worker
+re-tokenize via its own chat template, silently breaking every cache-hit match. Confirmed live
+against a real Dynamo/vLLM 0.26.0 server. End-to-end proof and the full record are in
+`PROGRESS_TRACKER.md`.*
+
 ---
 
 ### Gap 2: `roundhouse-server` binary wires no `LocalFleet`
@@ -115,6 +124,15 @@ writing a custom `main.rs` per deployment.
 **Admin recommendation:** Option A for the near term — it unblocks operators without code
 changes on their side. Option C is the right long-term answer for Kubernetes deployments and
 aligns with the admin API already present in `crates/roundhouse-server/src/admin_api.rs`.
+
+*2026-09-23: Implemented, as Option A — four `ROUNDHOUSE_LOCAL_*` env vars
+(`ENDPOINT`/`MODEL`/`TOKENIZER`/`KV_EVENTS_ENDPOINT`, all-or-nothing) rather than a `[local_fleet]`
+config-file stanza, matching the pattern every other operator-facing variable in `main.rs` already
+uses (`ROUNDHOUSE_FRONTIER_UPSTREAM`, `ROUNDHOUSE_OPENAI_API_BASE`, ...). `local_quality_prior`
+reuses `catalog.json`'s existing `local_quality` map rather than adding a fifth variable, so the
+number cannot disagree with what the savings dashboard already reads. Option C remains open and
+this does not foreclose it. See `crates/roundhouse-server/src/local_fleet.rs` and
+`PROGRESS_TRACKER.md`.*
 
 ---
 

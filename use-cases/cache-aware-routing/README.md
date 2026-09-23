@@ -155,26 +155,46 @@ kill $(lsof -t -i :8080)
 
 ## Local tier (Dynamo-served Qwen)
 
-**Dynamo itself is runnable and validated; roundhouse routing to it is not.** Two separate
-claims, proven separately:
+**Both claims are now proven: Dynamo serves the model, and roundhouse routes real turns to it.**
 
 - ✅ **Dynamo reachability** — validated hands-on 2026-09-23 on a single NVIDIA H100 80GB.
   `Qwen/Qwen2.5-Coder-32B-Instruct` fit and served with **no 14B fallback needed**: 61.04 GiB
   weights + 9.97 GiB KV cache (40,832 tokens, 1.25× concurrency at `max_model_len=32768`),
-  steady-state GPU memory ~76.9 / 81.6 GB used. A real completion came back from Dynamo's own
-  OpenAI-compatible endpoint:
-  ```bash
-  $ curl -s localhost:8000/v1/chat/completions -d '{"model":"Qwen/Qwen2.5-Coder-32B-Instruct",
-      "messages":[{"role":"user","content":"Say OK"}],"max_tokens":10}'
-  {"choices":[{"message":{"content":"OK","role":"assistant"},"finish_reason":"stop"}], ...}
+  steady-state GPU memory ~76.9 / 81.6 GB used. Full reproducible steps (sudo package list,
+  pinned-rev clone, `uv`/`maturin` build, the CUDA-13/FlashInfer workaround, the corrected
+  `dev/docker-compose.yml` path, weight pull, serve command) are in `DYNAMO_LOCAL_SERVING.md`.
+- ✅ **roundhouse routing to it** — implemented 2026-09-23: a real `HttpLocalExecutor`
+  (`crates/roundhouse-server/src/local_fleet.rs`) drives Dynamo's `/v1/completions` with raw
+  token ids (not text — see the file's own doc comment for why that distinction is load-bearing),
+  a real `HfTokenizer` loaded from the worker's own `tokenizer.json` replaces the offline-demo
+  `ByteTokenizer`, and `EmbeddedFleet` is attached in `main.rs`'s `serve()` behind opt-in
+  `ROUNDHOUSE_LOCAL_*` variables. End-to-end proof, a real turn through roundhouse's `/v1/responses`
+  against the live 32B worker, `/v1/metrics` afterward:
+  ```json
+  "models": [{"provider": "dynamo", "model": "Qwen/Qwen2.5-Coder-32B-Instruct", "calls": 1, ...}]
   ```
-  Full reproducible steps (sudo package list, pinned-rev clone, `uv`/`maturin` build, the
-  CUDA-13/FlashInfer workaround, the corrected `dev/docker-compose.yml` path, weight pull, serve
-  command) are in `DYNAMO_LOCAL_SERVING.md`.
-- ❌ **roundhouse routing to it** — still not runnable. That `curl` above talks to Dynamo
-  directly; roundhouse never sees it. See `GAPS.md` for the two missing pieces (a real
-  `LocalExecutor`, and a custom binary or config flag wiring `EmbeddedFleet` into
-  `roundhouse-server`).
+  and a 4-turn session through roundhouse itself showing real Tax A (cache% computed from the
+  ZMQ KV-event stream, not vLLM's own HTTP accounting this time):
+  ```
+  turn 1: in=1461 cached=0    cache%=0.0    <- cold
+  turn 2: in=1485 cached=1408 cache%=94.8
+  turn 3: in=1510 cached=1472 cache%=97.5
+  turn 4: in=1582 cached=1472 cache%=93.0
+  ```
+  See `PROGRESS_TRACKER.md` for the full implementation record.
+
+**Enabling it on a real run**, once Dynamo is serving (see above):
+```bash
+export ROUNDHOUSE_LOCAL_ENDPOINT=http://127.0.0.1:8000
+export ROUNDHOUSE_LOCAL_MODEL=Qwen/Qwen2.5-Coder-32B-Instruct
+export ROUNDHOUSE_LOCAL_TOKENIZER=/path/to/.../tokenizer.json   # the served model's own, from the HF cache
+export ROUNDHOUSE_LOCAL_KV_EVENTS_ENDPOINT=tcp://127.0.0.1:20080
+```
+All four are required together, or none at all — see `local_fleet::from_env`'s doc comment.
+`catalog.json`'s `local_quality` now names `Qwen/Qwen2.5-Coder-32B-Instruct: 0.72` (a hand-written
+placeholder, not sourced from a published index yet); `control-plane.json`'s `policy.allow` still
+defaults to `["*"]`, so both frontier and local are admissible and `AffinityPolicy` picks between
+them — narrow it to `["local/*"]` to force local-only, the way the proof above did.
 
 Serving recipe: `use-cases/cache-aware-routing/serve_model.sh` (now defaults to `GPUS=0 TP=1`
 for a single-GPU box; override for a real multi-GPU cluster node).

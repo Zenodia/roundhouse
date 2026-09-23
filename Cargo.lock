@@ -4858,6 +4858,7 @@ dependencies = [
  "hex",
  "http-body-util",
  "redis",
+ "reqwest",
  "roundhouse-core",
  "roundhouse-fleet",
  "roundhouse-mcp",

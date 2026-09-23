@@ -84,8 +84,8 @@ flowchart LR
 
 | Gap | Type | Severity | Where it lives | Unblocked by |
 |---|---|---|---|---|
-| Real `LocalExecutor` not implemented | Not built | P1 | `crates/roundhouse-fleet/src/local.rs` — trait exists; only `EchoLocalExecutor` and mocks implement it | Phase 2 Rust work |
-| `roundhouse-server` binary does not wire `LocalFleet` | Not wired | P1 | `crates/roundhouse-server/src/main.rs` — `serve()` attaches no `EmbeddedFleet` | Phase 2 custom binary |
+| ~~Real `LocalExecutor` not implemented~~ | **Resolved 2026-09-23** | ~~P1~~ | `crates/roundhouse-server/src/local_fleet.rs` — `HttpLocalExecutor` drives Dynamo's `/v1/completions` with raw token ids | Closed — see `PROGRESS_TRACKER.md` |
+| ~~`roundhouse-server` binary does not wire `LocalFleet`~~ | **Resolved 2026-09-23** | ~~P1~~ | `crates/roundhouse-server/src/main.rs` — `serve()` attaches `EmbeddedFleet` behind opt-in `ROUNDHOUSE_LOCAL_*` env vars (Option A from `INTEGRATION.md`'s own recommendation: a config flag, not a custom binary) | Closed — see `PROGRESS_TRACKER.md` |
 | Dynamo worker not running + roundhouse not co-located on cluster | Needs deployment | P1 | GPU cluster node — requires etcd + nats, Dynamo from pinned rev `ac7b7513`, Qwen weights, roundhouse running on same node | Phase 2 cluster setup — **2026-09-23: Dynamo itself is now actually installed and serving on this box (see addendum below); the roundhouse-side co-location/wiring is still open** |
 | `correlaries: []` — savings dashboard shows $0 | Needs config | P1 | `use-cases/cache-aware-routing/catalog.json` | Phase 3 |
 | Placeholder pricing in `catalog.json` | Needs config | P1 | `use-cases/cache-aware-routing/catalog.json` | Phase 3 |
