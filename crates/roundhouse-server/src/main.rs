@@ -64,6 +64,7 @@ use roundhouse_mcp::ControlStore;
 use roundhouse_server::catalog_config::{BUILT_IN_OPENAI, ProviderConfig};
 use roundhouse_server::control_config::crosscheck::CrossChecks;
 use roundhouse_server::local_fleet::{self, LocalFleetSetup, RuntimeTokenizer};
+use roundhouse_server::local_score;
 use roundhouse_server::{
     Backends, ControlDirectory, ControlPlane, ControlPlaneReads, Conversations, DirectoryError,
     EchoLocalExecutor, Engine, EngineConfig, FleetJudge, JudgeConfig, LocalExecutor,
@@ -1050,6 +1051,36 @@ async fn serve<S: SessionStore>(
     .with_fair_use_ledger(fair_use)
     .with_control_store(Arc::clone(&control));
 
+    // Built before `local_setup` is consumed below: `LocalScorer` needs its
+    // own endpoint + tokenizer, not a `LocalExecutor` to dispatch a turn
+    // through. `None` when no local fleet is configured *or* when
+    // `local_score::enabled()` says no — the second check is what keeps
+    // `/v1/local/score` opt-in rather than following automatically from
+    // ROUNDHOUSE_LOCAL_ENDPOINT alone; see `local_score`'s module doc for why
+    // a deployment like cache-aware-routing's, which wires a local fleet
+    // purely for turn dispatch, should not get this route for free.
+    let local_scorer = local_setup
+        .as_ref()
+        .filter(|_| local_score::enabled())
+        .map(|setup| {
+            Arc::new(local_score::LocalScorer::new(
+                setup.endpoint.clone(),
+                setup.local_model.clone(),
+                setup.tokenizer.clone(),
+            ))
+        });
+    match (local_setup.is_some(), &local_scorer) {
+        (true, Some(_)) => tracing::info!(
+            var = local_score::ENABLE_SCORE_VAR,
+            "local fleet: real log-probability scoring enabled at /v1/local/score"
+        ),
+        (true, None) => tracing::info!(
+            var = local_score::ENABLE_SCORE_VAR,
+            "local fleet: /v1/local/score not mounted (unset); turn dispatch is unaffected"
+        ),
+        (false, _) => {}
+    }
+
     if let Some(setup) = local_setup {
         engine = engine.with_fleet(setup.fleet as Arc<dyn LocalFleet>);
     }
@@ -1150,6 +1181,14 @@ async fn serve<S: SessionStore>(
         Arc::clone(&store),
         Arc::clone(&conversations),
     ))
+    // `/v1/local/score` — real log-probability option scoring, mounted only
+    // when a local fleet is configured; an empty router otherwise, so the
+    // route simply does not exist (404) rather than existing and refusing.
+    // See `local_score`'s module doc and `openjev-demo/INTEGRATION.md` Gap 1.
+    .merge(match local_scorer {
+        Some(scorer) => local_score::local_score_router(Arc::clone(&directory), scorer),
+        None => axum::Router::new(),
+    })
     // The Messages API, which lets Claude Code drive the same sessions
     // unmodified. Four arguments identical to the Responses surface's, and
     // that sameness is the point: it is the same log under a second

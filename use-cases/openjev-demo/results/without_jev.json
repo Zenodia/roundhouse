@@ -1,0 +1,240 @@
+{
+  "workload": "without_jev",
+  "model": "Qwen/Qwen2.5-Coder-32B-Instruct",
+  "tickets": [
+    {
+      "ticket_id": "stripe-outage",
+      "calls": [
+        {
+          "ticket_id": "stripe-outage",
+          "question_id": "combined",
+          "raw_text": "{\n  \"department\": \"technical\",\n  \"frustration\": 2,\n  \"is_urgent\": true\n}",
+          "answer": {
+            "department": "technical",
+            "frustration": 2,
+            "is_urgent": true
+          },
+          "parse_error": null,
+          "expected_fields": [
+            "department",
+            "frustration",
+            "is_urgent"
+          ],
+          "ttft_ms": 94.20885999952588,
+          "decode_ms": 610.7446080004593,
+          "total_ms": 730.873292999604,
+          "call_error": null,
+          "prompt_tokens": 251,
+          "cached_tokens": 0,
+          "new_prefill_tokens": 251,
+          "cache_hit_pct": 0.0,
+          "is_cold_start": true,
+          "completion_tokens": 27
+        }
+      ],
+      "rollup": {
+        "calls": 1,
+        "total_tokens": 278,
+        "total_prompt_tokens": 251,
+        "total_cached_tokens": 0,
+        "total_new_prefill_tokens": 251,
+        "total_completion_tokens": 27,
+        "cache_hit_pct": 0.0,
+        "total_ttft_ms": 94.20885999952588,
+        "total_decode_ms": 610.7446080004593,
+        "total_wall_ms": 730.873292999604,
+        "cold_start_calls": 1
+      }
+    },
+    {
+      "ticket_id": "plan-question",
+      "calls": [
+        {
+          "ticket_id": "plan-question",
+          "question_id": "combined",
+          "raw_text": "{\n  \"department\": \"sales\",\n  \"frustration\": 0,\n  \"is_urgent\": false\n}",
+          "answer": {
+            "department": "sales",
+            "frustration": 0,
+            "is_urgent": false
+          },
+          "parse_error": null,
+          "expected_fields": [
+            "department",
+            "frustration",
+            "is_urgent"
+          ],
+          "ttft_ms": 78.1938390000505,
+          "decode_ms": 608.9408610005194,
+          "total_ms": 713.4383850006998,
+          "call_error": null,
+          "prompt_tokens": 258,
+          "cached_tokens": 192,
+          "new_prefill_tokens": 66,
+          "cache_hit_pct": 74.4186046511628,
+          "is_cold_start": false,
+          "completion_tokens": 27
+        }
+      ],
+      "rollup": {
+        "calls": 1,
+        "total_tokens": 285,
+        "total_prompt_tokens": 258,
+        "total_cached_tokens": 192,
+        "total_new_prefill_tokens": 66,
+        "total_completion_tokens": 27,
+        "cache_hit_pct": 74.4186046511628,
+        "total_ttft_ms": 78.1938390000505,
+        "total_decode_ms": 608.9408610005194,
+        "total_wall_ms": 713.4383850006998,
+        "cold_start_calls": 0
+      }
+    },
+    {
+      "ticket_id": "wrong-invoice",
+      "calls": [
+        {
+          "ticket_id": "wrong-invoice",
+          "question_id": "combined",
+          "raw_text": "{\n  \"department\": \"billing\",\n  \"frustration\": 2,\n  \"is_urgent\": true\n}",
+          "answer": {
+            "department": "billing",
+            "frustration": 2,
+            "is_urgent": true
+          },
+          "parse_error": null,
+          "expected_fields": [
+            "department",
+            "frustration",
+            "is_urgent"
+          ],
+          "ttft_ms": 75.7371379995675,
+          "decode_ms": 608.5078930000236,
+          "total_ms": 710.3070519997345,
+          "call_error": null,
+          "prompt_tokens": 255,
+          "cached_tokens": 192,
+          "new_prefill_tokens": 63,
+          "cache_hit_pct": 75.29411764705883,
+          "is_cold_start": false,
+          "completion_tokens": 27
+        }
+      ],
+      "rollup": {
+        "calls": 1,
+        "total_tokens": 282,
+        "total_prompt_tokens": 255,
+        "total_cached_tokens": 192,
+        "total_new_prefill_tokens": 63,
+        "total_completion_tokens": 27,
+        "cache_hit_pct": 75.29411764705883,
+        "total_ttft_ms": 75.7371379995675,
+        "total_decode_ms": 608.5078930000236,
+        "total_wall_ms": 710.3070519997345,
+        "cold_start_calls": 0
+      }
+    },
+    {
+      "ticket_id": "api-error-500",
+      "calls": [
+        {
+          "ticket_id": "api-error-500",
+          "question_id": "combined",
+          "raw_text": "{\n  \"department\": \"technical\",\n  \"frustration\": 2,\n  \"is_urgent\": true\n}",
+          "answer": {
+            "department": "technical",
+            "frustration": 2,
+            "is_urgent": true
+          },
+          "parse_error": null,
+          "expected_fields": [
+            "department",
+            "frustration",
+            "is_urgent"
+          ],
+          "ttft_ms": 70.28288000037719,
+          "decode_ms": 606.0845900001368,
+          "total_ms": 702.5659999999334,
+          "call_error": null,
+          "prompt_tokens": 258,
+          "cached_tokens": 192,
+          "new_prefill_tokens": 66,
+          "cache_hit_pct": 74.4186046511628,
+          "is_cold_start": false,
+          "completion_tokens": 27
+        }
+      ],
+      "rollup": {
+        "calls": 1,
+        "total_tokens": 285,
+        "total_prompt_tokens": 258,
+        "total_cached_tokens": 192,
+        "total_new_prefill_tokens": 66,
+        "total_completion_tokens": 27,
+        "cache_hit_pct": 74.4186046511628,
+        "total_ttft_ms": 70.28288000037719,
+        "total_decode_ms": 606.0845900001368,
+        "total_wall_ms": 702.5659999999334,
+        "cold_start_calls": 0
+      }
+    },
+    {
+      "ticket_id": "feature-request",
+      "calls": [
+        {
+          "ticket_id": "feature-request",
+          "question_id": "combined",
+          "raw_text": "{\n  \"department\": \"technical\",\n  \"frustration\": 0,\n  \"is_urgent\": false\n}",
+          "answer": {
+            "department": "technical",
+            "frustration": 0,
+            "is_urgent": false
+          },
+          "parse_error": null,
+          "expected_fields": [
+            "department",
+            "frustration",
+            "is_urgent"
+          ],
+          "ttft_ms": 67.5555620000523,
+          "decode_ms": 608.1272100000206,
+          "total_ms": 701.9032369998968,
+          "call_error": null,
+          "prompt_tokens": 254,
+          "cached_tokens": 192,
+          "new_prefill_tokens": 62,
+          "cache_hit_pct": 75.59055118110236,
+          "is_cold_start": false,
+          "completion_tokens": 27
+        }
+      ],
+      "rollup": {
+        "calls": 1,
+        "total_tokens": 281,
+        "total_prompt_tokens": 254,
+        "total_cached_tokens": 192,
+        "total_new_prefill_tokens": 62,
+        "total_completion_tokens": 27,
+        "cache_hit_pct": 75.59055118110236,
+        "total_ttft_ms": 67.5555620000523,
+        "total_decode_ms": 608.1272100000206,
+        "total_wall_ms": 701.9032369998968,
+        "cold_start_calls": 0
+      }
+    }
+  ],
+  "rollup": {
+    "calls": 5,
+    "total_tokens": 1411,
+    "total_prompt_tokens": 1276,
+    "total_cached_tokens": 768,
+    "total_new_prefill_tokens": 508,
+    "total_completion_tokens": 135,
+    "cache_hit_pct": 60.18808777429467,
+    "total_ttft_ms": 385.9782789995734,
+    "total_decode_ms": 3042.4051620011596,
+    "total_wall_ms": 3559.0879669998685,
+    "cold_start_calls": 1,
+    "measured_wall_ms": 3560.2323570001317
+  }
+}

@@ -1,0 +1,67 @@
+{
+  "methodology": "cold-restart Dynamo worker before each condition; same 5 tickets; direct-to-Dynamo streaming calls",
+  "with_openjev": {
+    "calls": 40,
+    "total_tokens": 2923,
+    "total_prompt_tokens": 2883,
+    "total_cached_tokens": 1280,
+    "total_new_prefill_tokens": 1603,
+    "total_completion_tokens": 40,
+    "cache_hit_pct": 44.39819632327437,
+    "total_ttft_ms": 1530.956261000938,
+    "total_decode_ms": 0.0,
+    "total_wall_ms": 1555.5735630005074,
+    "cold_start_calls": 20,
+    "measured_wall_ms": 1564.4346669996594
+  },
+  "without_jev": {
+    "calls": 5,
+    "total_tokens": 1411,
+    "total_prompt_tokens": 1276,
+    "total_cached_tokens": 768,
+    "total_new_prefill_tokens": 508,
+    "total_completion_tokens": 135,
+    "cache_hit_pct": 60.18808777429467,
+    "total_ttft_ms": 385.9782789995734,
+    "total_decode_ms": 3042.4051620011596,
+    "total_wall_ms": 3559.0879669998685,
+    "cold_start_calls": 1,
+    "measured_wall_ms": 3560.2323570001317
+  },
+  "per_ticket": {
+    "with_openjev": {
+      "calls": 8.0,
+      "total_tokens": 584.6,
+      "total_prompt_tokens": 576.6,
+      "total_cached_tokens": 256.0,
+      "total_new_prefill_tokens": 320.6,
+      "total_completion_tokens": 8.0,
+      "cache_hit_pct": 8.879639264654873,
+      "total_ttft_ms": 306.1912522001876,
+      "total_decode_ms": 0.0,
+      "total_wall_ms": 311.1147126001015,
+      "cold_start_calls": 4.0,
+      "measured_wall_ms": 312.8869333999319
+    },
+    "without_jev": {
+      "calls": 1.0,
+      "total_tokens": 282.2,
+      "total_prompt_tokens": 255.2,
+      "total_cached_tokens": 153.6,
+      "total_new_prefill_tokens": 101.6,
+      "total_completion_tokens": 27.0,
+      "cache_hit_pct": 12.037617554858935,
+      "total_ttft_ms": 77.19565579991468,
+      "total_decode_ms": 608.4810324002319,
+      "total_wall_ms": 711.8175933999737,
+      "cold_start_calls": 0.2,
+      "measured_wall_ms": 712.0464714000263
+    }
+  },
+  "ratios_openjev_over_without": {
+    "wall_ms_per_ticket": 0.43707083877215247,
+    "total_tokens_per_ticket": 2.0715804394046775,
+    "new_work_tokens_per_ticket": 2.555209953343702,
+    "decode_ms_per_ticket": 0.0
+  }
+}

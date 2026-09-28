@@ -186,6 +186,11 @@ pub struct LocalFleetSetup {
     pub fleet: Arc<EmbeddedFleet>,
     pub executor: Arc<dyn LocalExecutor>,
     pub tokenizer: RuntimeTokenizer,
+    /// The worker's own HTTP endpoint. Duplicates what `executor` already
+    /// dispatches to, kept here too because `local_score` needs the bare
+    /// endpoint string to build its own client, not a `LocalExecutor` to
+    /// dispatch a turn through.
+    pub endpoint: String,
     pub local_model: String,
     pub routing_group: String,
     pub block_size: u32,
@@ -243,16 +248,12 @@ pub async fn from_env(
         )
     })?;
     let block_size: u32 = match env(BLOCK_SIZE_VAR) {
-        Some(raw) => raw
-            .parse()
-            .with_context_var(BLOCK_SIZE_VAR, &raw)?,
+        Some(raw) => raw.parse().with_context_var(BLOCK_SIZE_VAR, &raw)?,
         None => DEFAULT_BLOCK_SIZE,
     };
     let routing_group = env(ROUTING_GROUP_VAR).unwrap_or_else(|| DEFAULT_ROUTING_GROUP.to_string());
     let base_ttft_ms: f64 = match env(BASE_TTFT_MS_VAR) {
-        Some(raw) => raw
-            .parse()
-            .with_context_var(BASE_TTFT_MS_VAR, &raw)?,
+        Some(raw) => raw.parse().with_context_var(BASE_TTFT_MS_VAR, &raw)?,
         None => DEFAULT_BASE_TTFT_MS,
     };
     let quality_prior = local_quality
@@ -305,6 +306,7 @@ pub async fn from_env(
         fleet,
         executor: Arc::new(HttpLocalExecutor::new(model.clone())),
         tokenizer,
+        endpoint,
         local_model: model,
         routing_group,
         block_size,

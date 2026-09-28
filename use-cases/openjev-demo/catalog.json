@@ -1,0 +1,54 @@
+{
+  "$comment": [
+    "openjev-demo catalog. This use case is local-first by design -- a Jev-style decision layer's",
+    "whole pitch is fast, cheap, bounded answers from a small local model, not a frontier round",
+    "trip -- so control-plane.json's policy admits only 'local/*'. The frontier entry below exists",
+    "only because roundhouse's catalog schema refuses to boot with zero models (CatalogError::Empty,",
+    "crates/roundhouse-server/src/catalog_config.rs); it is never dispatched to under this use case's",
+    "policy, and INFERENCE_API_KEY may be any non-empty placeholder value at boot as a result.",
+    "'provider'/'providers' schema note carried over from cache-aware-routing: every model needs a",
+    "top-level 'providers' entry (M10.1 provider registry) -- see that use case's README for why.",
+    "PRICES BELOW ARE PLACEHOLDERS. quality_prior is configuration, not measurement.",
+    "local_quality's 0.72 for Qwen2.5-Coder-32B-Instruct is the same hand-written placeholder",
+    "cache-aware-routing uses (Option B, INTEGRATION.md Gap 4) -- this use case reuses that",
+    "use case's already-running, already-validated Dynamo/Qwen worker rather than serving a second",
+    "model, precisely to avoid the extra install/GPU-memory cost of standing up Gemma separately.",
+    "See README.md 'Why Qwen, not Gemma' for the full reasoning."
+  ],
+
+  "providers": {
+    "nvidia": {
+      "base_url": "https://inference-api.nvidia.com/v1",
+      "routes": { "messages": "/messages" },
+      "auth": { "env": "INFERENCE_API_KEY", "style": "bearer" }
+    }
+  },
+
+  "models": [
+    {
+      "provider": "nvidia",
+      "model": "aws/anthropic/bedrock-claude-opus-4-8",
+      "wire_protocol": "anthropic_messages",
+      "cache_model": {
+        "kind": "deterministic",
+        "ttl_ms": 300000
+      },
+      "pricing": {
+        "input_per_mtok_usd": 15.0,
+        "cached_input_per_mtok_usd": 1.5,
+        "cache_write_per_mtok_usd": 18.75,
+        "output_per_mtok_usd": 75.0
+      },
+      "quality_prior": 0.95,
+      "base_ttft_ms": 350.0,
+      "ttft_ms_per_uncached_token": 0.0015
+    }
+  ],
+
+  "local_quality": { "Qwen/Qwen2.5-Coder-32B-Instruct": 0.72 },
+
+  "correlaries": [],
+
+  "default_local_quality": 0.5,
+  "capability_band": 0.10
+}

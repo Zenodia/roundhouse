@@ -1,0 +1,49 @@
+{
+  "$comment": [
+    "openjev-demo control plane. policy.allow is 'local/*' only -- deliberately, not the",
+    "frontier-admitting '*' cache-aware-routing uses -- because this use case's whole point is",
+    "a fast, cheap, local decision layer; a turn that fell over to the frontier model would be",
+    "answering the wrong question about what this demo is for. The turn key's SECRET is never in",
+    "this file -- only sha256(secret). Run mint_keys.py to fill in the key_sha256 fields.",
+    "credentials.providers.nvidia is still required (the catalog's one frontier entry needs some",
+    "provider defined so the boot's provider cross-check passes), but INFERENCE_API_KEY may be any",
+    "non-empty placeholder -- see catalog.json's $comment. No second user is configured: this use",
+    "case doesn't have a cache-aware-routing-style Tax B claim to demonstrate (see GAPS.md)."
+  ],
+  "projects": [
+    {
+      "id": "openjev-demo",
+      "name": "openjev Decision Layer Demo",
+      "policy": {
+        "min_quality": 0.0,
+        "allow": [
+          "local/*"
+        ]
+      },
+      "credentials": {
+        "mode": "project_only",
+        "providers": {
+          "nvidia": {
+            "env_var": "INFERENCE_API_KEY",
+            "kind": "api_key"
+          }
+        }
+      }
+    }
+  ],
+  "users": [
+    {
+      "id": "dev"
+    }
+  ],
+  "keys": [
+    {
+      "project": "openjev-demo",
+      "user": "dev",
+      "key_sha256": "8f35b69730333b369b876588f2fc77ee71471a8d25ca28b7dc1e3f1d072e863d"
+    }
+  ],
+  "admin_keys": [
+    "5934954ebf2881c611af35a0b2bd5292777bdc54dda671cb87e3bad3a3ba790c"
+  ]
+}

@@ -79,6 +79,7 @@ pub mod engine;
 pub mod http;
 pub mod judge;
 pub mod local_fleet;
+pub mod local_score;
 pub mod mcp_api;
 pub mod messages_api;
 pub mod metrics_api;
