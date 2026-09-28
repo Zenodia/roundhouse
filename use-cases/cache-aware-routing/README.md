@@ -90,6 +90,10 @@ ssh -L 8080:localhost:8080 user@your-gpu-cluster-node
 | `control-plane.json` | Two-level identity (project `kv-cache-demo`, user `dev`), credentials, policy. |
 | `mint_keys.py` | Mints `rh_turn_`/`rh_admin_` secrets, patches hashes, writes `keys.local.json`. |
 | `run.py` | Driver: replays 20 turns per membership, prints per-turn cache stats + `/v1/metrics`. |
+| `run_local.py` | Local-only counterpart to `run.py` — talks straight to Dynamo, no roundhouse. |
+| `pull_model.sh` | Downloads model weights (and optionally installs Dynamo from a clone). |
+| `serve_model.sh` | Launches Dynamo + the vLLM worker with KV-event publishing. |
+| `shutdown_served_model.sh` | Spins the two back down, independently or together — see its own header. |
 
 ## Expected output (baseline — frontier-only)
 
@@ -196,8 +200,18 @@ placeholder, not sourced from a published index yet); `control-plane.json`'s `po
 defaults to `["*"]`, so both frontier and local are admissible and `AffinityPolicy` picks between
 them — narrow it to `["local/*"]` to force local-only, the way the proof above did.
 
+**Not set here, deliberately:** `ROUNDHOUSE_LOCAL_ENABLE_SCORE`. This use case wires the local
+fleet purely for ordinary turn dispatch and never calls `/v1/local/score` (the real
+log-probability-scoring endpoint `openjev-demo` uses) — that route is a separate, off-by-default
+opt-in precisely so a deployment like this one doesn't carry an unused surface, or its extra
+per-option HTTP round trips, for nothing. See `use-cases/openjev-demo/README.md`'s "The
+`ROUNDHOUSE_LOCAL_ENABLE_SCORE` flag" section for the full reasoning.
+
 Serving recipe: `use-cases/cache-aware-routing/serve_model.sh` (now defaults to `GPUS=0 TP=1`
 for a single-GPU box; override for a real multi-GPU cluster node).
+`use-cases/cache-aware-routing/shutdown_served_model.sh` spins it back down — `--frontend` or
+`--worker` independently (see that script's own header for why independent shutdown matters:
+`serve_model.sh` ties both to one shell's exit trap), or with no argument, both together.
 
 **`run_local.py` — the local-only counterpart to `run.py`.** Since roundhouse cannot route to
 Dynamo yet, this script replays the identical corpus + `turns.jsonl` fixture directly against

@@ -151,6 +151,26 @@ Expect a real `chat.completion` object back, e.g.:
 {"id":"chatcmpl-...","choices":[{"message":{"content":"OK","role":"assistant"},"finish_reason":"stop"}],...}
 ```
 
+### 10. Shutting down
+
+```bash
+./use-cases/cache-aware-routing/shutdown_served_model.sh          # stop both frontend and worker
+./use-cases/cache-aware-routing/shutdown_served_model.sh --status # report what's running, change nothing
+```
+
+**Do not just Ctrl+C the terminal `serve_model.sh serve` is running in** if you only meant to
+restart the frontend — `serve_model.sh` backgrounds the frontend and the worker as two jobs of
+one shell and sets `trap 'kill 0' EXIT`, so exiting that shell for any reason takes both down
+together. Restarting just the frontend (e.g. to add `DYN_VLLM_ENABLE_INFERENCE_V1_GENERATE`, or
+any other env var) from inside that same shell fires the trap and kills the worker underneath
+it too — several minutes of weight loading gone for a change that only touched the frontend.
+This actually happened validating `openjev-demo`'s real log-probability scoring (2026-09-28).
+
+`shutdown_served_model.sh --frontend` or `--worker` kills by process pattern from an
+independent shell instead, so each half can be brought down and restarted without disturbing
+the other — see the script's own header for the full reasoning, and `--all` if you also want
+etcd/nats brought down via `docker compose down`.
+
 ## KV cache result — why 32B fit, and when 14B is still the right call
 
 | Metric | Value |
