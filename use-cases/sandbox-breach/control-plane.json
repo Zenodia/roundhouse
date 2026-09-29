@@ -1,0 +1,82 @@
+{
+  "$comment": [
+    "sandbox-breach control plane. Two projects, one per A/B leg, so the same unmodified",
+    "OpenClaw/Claude-Code-in-OpenShell-sandbox agent and the same memory-recall exploit route to",
+    "two different backends purely by which roundhouse turn key it is handed -- nothing in the",
+    "agent, the skill, or the exploit payload changes between legs. 'sandbox-breach-local' allows",
+    "only 'local/*' (Dynamo-served Qwen); 'sandbox-breach-frontier' allows only",
+    "'nvidia-inference-api/*' (azure/anthropic/claude-opus-5 via NVIDIA's inference-api gateway).",
+    "Neither project uses '*' on purpose: this demo's point is to show the SAME exploit succeeding",
+    "identically regardless of which model authored the poisoned tool-call arguments, so each leg's",
+    "policy should refuse to silently fall over to the other backend.",
+    "The turn key's SECRET is never in this file -- only sha256(secret). Run mint_keys.py to fill in",
+    "the key_sha256 fields; it writes the plain secrets to keys.local.json (gitignored).",
+    "credentials.providers.nvidia-inference-api.env_var names the variable the server reads at",
+    "startup (INFERENCE_API_KEY) -- it must be exported or the server refuses to load, even for the",
+    "local-only project, because the catalog's one frontier entry still needs a provider cross-check",
+    "to pass (see openjev-demo's control-plane.json $comment for the same reasoning)."
+  ],
+  "projects": [
+    {
+      "id": "sandbox-breach-local",
+      "name": "Sandbox Breach -- Local Qwen Leg",
+      "policy": {
+        "min_quality": 0.0,
+        "allow": [
+          "local/*"
+        ]
+      },
+      "credentials": {
+        "mode": "project_only",
+        "providers": {
+          "nvidia-inference-api": {
+            "env_var": "INFERENCE_API_KEY",
+            "kind": "api_key"
+          }
+        }
+      }
+    },
+    {
+      "id": "sandbox-breach-frontier",
+      "name": "Sandbox Breach -- Frontier Opus 5 Leg",
+      "policy": {
+        "min_quality": 0.0,
+        "allow": [
+          "nvidia-inference-api/*"
+        ]
+      },
+      "credentials": {
+        "mode": "project_only",
+        "providers": {
+          "nvidia-inference-api": {
+            "env_var": "INFERENCE_API_KEY",
+            "kind": "api_key"
+          }
+        }
+      }
+    }
+  ],
+  "users": [
+    {
+      "id": "openclaw-local"
+    },
+    {
+      "id": "openclaw-frontier"
+    }
+  ],
+  "keys": [
+    {
+      "project": "sandbox-breach-local",
+      "user": "openclaw-local",
+      "key_sha256": "1148999fab6210442ce5d8c10646cd7e575cf8c7e21ee598b19468922c0c73b9"
+    },
+    {
+      "project": "sandbox-breach-frontier",
+      "user": "openclaw-frontier",
+      "key_sha256": "cd1b0671b779b003b75769d1c8cf6943dbca3ceb41d14d83e389a703b2148210"
+    }
+  ],
+  "admin_keys": [
+    "ae143bfcb79134a0e3651e06e971f81a2c997aac7e0fcbc6aa238bdc0733a5d4"
+  ]
+}

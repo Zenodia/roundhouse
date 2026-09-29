@@ -1,0 +1,43 @@
+# Custom OpenShell provider profile: routes the in-sandbox agent's own
+# reasoning-LLM calls through roundhouse instead of directly to Anthropic.
+# This is the exported, live form (openshell provider profile export roundhouse)
+# -- resource_version must stay in sync with the gateway's copy for
+# `openshell provider profile update` to accept further edits; edit via
+# export -> patch -> update, not by hand-editing resource_version.
+#
+# binaries lists every process that is allowed to open a connection to the
+# endpoint below: claude (the agent's own reasoning calls) and nemo-relay
+# (the chained topology's own gateway process, which makes the upstream HTTP
+# call to roundhouse on the agent's behalf -- verified empirically 2026-09-29
+# that omitting it produces repeated `upstream_failed boundary=upstream
+# error_kind=transport` retries from Relay's own gateway).
+id: roundhouse
+resource_version: 1
+display_name: Roundhouse (local sandbox-breach demo)
+description: Routes the sandboxed agent's reasoning-LLM calls through the roundhouse turn/routing layer instead of directly to a model provider.
+category: agent
+credentials:
+  - name: api_key
+    description: Sentinel Anthropic-shaped API key (public, not a real credential)
+    env_vars:
+      - ANTHROPIC_API_KEY
+    required: true
+    auth_style: header
+    header_name: x-api-key
+    query_param: ""
+endpoints:
+  - host: host.openshell.internal
+    port: 8080
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+binaries:
+  - /usr/bin/claude
+  - /usr/local/bin/claude
+  - /sandbox/.venv/bin/nemo-relay
+inference_capable: true
+discovery:
+  credentials:
+    - api_key
+source: user
+scope: platform

@@ -1,0 +1,58 @@
+# Custom OpenShell sandbox policy for the sandbox-breach demo.
+#
+# OpenShell's default policy denies all outbound network access (see
+# docs/how-it-works/policies/default-policy.mdx); an attached provider's
+# endpoints layer on top of whichever base policy is selected, but this
+# demo also needs a second, non-credentialed destination -- the vulnerable
+# memory-mcp server -- which is not a "provider" in OpenShell's sense (no
+# credential, no least-privilege binary list beyond the skill's own client).
+# --policy overrides the built-in default filesystem baseline, so this file
+# restates it (per default-policy.mdx) rather than relying on it implicitly.
+#
+# Filesystem/landlock section is the documented default, restated so
+# --policy's full-override semantics do not silently drop it.
+
+version: 1
+
+filesystem_policy:
+  include_workdir: true
+  read_only:
+    - /bin
+    - /usr
+    - /lib
+    - /proc
+    - /dev/urandom
+    - /etc
+    - /var/log
+  read_write:
+    - /tmp
+    - /dev/null
+
+landlock:
+  compatibility: best_effort
+
+# The roundhouse provider (attached via --provider roundhouse) contributes its
+# own network rule for host.openshell.internal:8080. This rule is the other
+# half: the memory-mcp server the memory-recall Agent Skill's recall.py talks
+# to -- deliberately vulnerable, deliberately reachable, that is the whole
+# point of the demo (see openshell/skills/memory-recall/SKILL.md's security
+# note in breakout-lab).
+network_policies:
+  pypi:
+    name: PyPI (installs fastmcp for the memory-recall skill's MCP client)
+    endpoints:
+      - { host: pypi.org, port: 443, protocol: rest, access: read-write, enforcement: enforce }
+      - { host: files.pythonhosted.org, port: 443, protocol: rest, access: read-write, enforcement: enforce }
+    binaries:
+      - path: /sandbox/.uv/python/cpython-3.14.3-linux-x86_64-gnu/bin/python3.14
+  memory-mcp:
+    name: Memory MCP server (breakout-lab, outside the sandbox)
+    endpoints:
+      - { host: host.openshell.internal, port: 8999, protocol: rest, access: read-write, enforcement: enforce }
+    binaries:
+      # OpenShell's binary allowlist resolves through /sandbox/.venv/bin/python3's
+      # symlink to the real interpreter path -- listing the symlink alone is
+      # silently ineligible (denied as transparent_tcp_policy_denied); verified
+      # empirically 2026-09-29 against the openshell-community sandbox base image.
+      - path: /sandbox/.uv/python/cpython-3.14.3-linux-x86_64-gnu/bin/python3.14
+      - path: /sandbox/.venv/bin/python3
