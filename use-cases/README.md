@@ -9,11 +9,16 @@ Each subdirectory is a structured evaluation of roundhouse applied to a specific
 case gets the same four documents: a fitness **SCORECARD**, a **GAPS** analysis with architecture
 diagram, and a **PLAN** of phased implementation steps.
 
+**Setting up a fresh GPU box to run any of these end to end** (Dynamo, model weights, the local
+tier, and — optionally — the real `open-jev` reference project)? Start with
+[`ENVIRONMENT_SETUP.md`](ENVIRONMENT_SETUP.md), not this file.
+
 ## Index
 
-| Use case | Domain | Score (current → target) | Status |
-|---|---|---|---|
-| [`cache-aware-routing`](cache-aware-routing/) | KV-cache re-discovery tax measurement | 12 / 24 → 20 / 24 | Frontier-only baseline running |
+| Use case | Domain | Status |
+|---|---|---|
+| [`cache-aware-routing`](cache-aware-routing/) | KV-cache re-discovery tax measurement | Frontier-only **and** local-tier routing both real and validated — see its `PROGRESS_TRACKER.md`. `SCORECARD.md`'s 12/24 predates that work and needs re-scoring; treat the tracker as current, not the scorecard. |
+| [`openjev-demo`](openjev-demo/) | Jev/System-One-style decision layer over the local tier | 10 / 24 → 11 / 24. Real log-probability scoring (`/v1/local/score`) working and measured against a structured-JSON-generation baseline — see its `README.md` "Tokenomics" section for what the comparison actually showed. |
 
 ## Score bands
 

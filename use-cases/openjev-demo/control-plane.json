@@ -40,10 +40,10 @@
     {
       "project": "openjev-demo",
       "user": "dev",
-      "key_sha256": "8f35b69730333b369b876588f2fc77ee71471a8d25ca28b7dc1e3f1d072e863d"
+      "key_sha256": "a7412bd7d13758880afdc9fcf27eb178750602280159b85da7fff11f28b25f9f"
     }
   ],
   "admin_keys": [
-    "5934954ebf2881c611af35a0b2bd5292777bdc54dda671cb87e3bad3a3ba790c"
+    "03d87c1654957f6fc0da2a1bde9bc8cd3d21ec570a5c3640a187dd9c94e2d3a0"
   ]
 }

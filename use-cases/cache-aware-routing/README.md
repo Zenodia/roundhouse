@@ -187,6 +187,22 @@ kill $(lsof -t -i :8080)
   ```
   See `PROGRESS_TRACKER.md` for the full implementation record.
 
+**Before any of this — check Dynamo is actually still serving, don't assume it.** A process
+dying, a box rebooting, or a previous session ending all leave roundhouse itself running fine
+while Dynamo silently isn't — and a turn routed to `local/*` then fails with a roundhouse-side
+connection error that's easy to misdiagnose as a roundhouse bug rather than "the worker isn't
+there." One-line check:
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" --max-time 3 http://127.0.0.1:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"Qwen/Qwen2.5-Coder-32B-Instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}'
+```
+`200` = up, proceed below. Anything else (`000`, connection refused) = Dynamo needs restarting
+— see `use-cases/openjev-demo/README.md`'s "Reusing an existing worker" section for the exact
+manual spin-up commands (four steps: etcd/nats, frontend, worker, verify), or
+`DYNAMO_LOCAL_SERVING.md`/`ENVIRONMENT_SETUP.md` if this is a fresh box with nothing installed
+yet.
+
 **Enabling it on a real run**, once Dynamo is serving (see above):
 ```bash
 export ROUNDHOUSE_LOCAL_ENDPOINT=http://127.0.0.1:8000

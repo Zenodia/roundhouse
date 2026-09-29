@@ -81,7 +81,7 @@ model would defeat the point of the workload it's demonstrating.
 
 ```
 [This machine, or an SSH-tunneled laptop]
-  client (run.py) ──▶ roundhouse :8080
+  client (run.py / run_score.py ) ──▶ roundhouse :8080
                            │  in-process EmbeddedFleet, real HttpLocalExecutor
                            │  ZMQ subscribe (KV events)
                       Dynamo worker (Qwen2.5-Coder-32B, reused from cache-aware-routing)
@@ -90,6 +90,102 @@ model would defeat the point of the workload it's demonstrating.
 A frontier catalog entry still exists in `catalog.json` (roundhouse refuses to boot with an
 empty catalog — `CatalogError::Empty`) but is never dispatched to under this policy; see that
 file's `$comment`.
+
+## Quickstart: spin up Dynamo + Qwen and run `run_score.py`, start to finish
+
+Everything below in one place, in order, for someone who just wants to run it — the sections
+further down (`Reusing an existing worker`, `The ROUNDHOUSE_LOCAL_ENABLE_SCORE flag`, `Which
+script do I run?`) explain the *why* behind each step if you need it; this section is only the
+*what*. If a step here fails, its explanation is one of those sections away.
+
+```bash
+# --- 0. Is Dynamo already running? Check before assuming either way. ---
+curl -s -o /dev/null -w "%{http_code}\n" --max-time 3 http://127.0.0.1:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"Qwen/Qwen2.5-Coder-32B-Instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":1}'
+# 200 -> skip to step 2. Anything else (000, connection refused) -> step 1.
+```
+
+```bash
+# --- 1. Spin up Dynamo (skip if step 0 printed 200) ---
+# Needs the model weights pulled and Dynamo's Python env built already -- if this is a
+# fresh box that's never had either, do ENVIRONMENT_SETUP.md §6-§9 first, then come back.
+
+# 1a. etcd + nats
+cd ~/dynamo/dev && docker compose up -d && cd -
+
+# 1b. Frontend -- run in its own terminal, leave it running
+source ~/dynamo/.venv/bin/activate
+python -m dynamo.frontend --router-mode kv --http-port 8000
+
+# 1c. Worker -- a SECOND terminal, leave it running too. This is the slow step: ~1-3 min
+# even with weights already cached locally. Wait for "chat endpoints enabled" in its log.
+source ~/dynamo/.venv/bin/activate
+export VLLM_USE_FLASHINFER_SAMPLER=0   # CUDA-13 workaround; harmless on CUDA 12
+CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
+  --model Qwen/Qwen2.5-Coder-32B-Instruct --block-size 64 --tensor-parallel-size 1 \
+  --enable-prefix-caching --enforce-eager \
+  --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
+
+# 1d. Re-run step 0's curl -- must print 200 before continuing.
+```
+
+```bash
+# --- 2. Mint roundhouse keys (one-time) ---
+cd <roundhouse-repo-root>
+python3 use-cases/openjev-demo/mint_keys.py
+```
+**Do this *before* step 3, not after, and don't re-run it once roundhouse (step 3) is up.**
+`mint_keys.py` overwrites `control-plane.json` with a freshly generated key every time it
+runs — but roundhouse only reads that file once, at boot; it does not hot-reload it. Run this
+again while roundhouse is already running (e.g. re-following this Quickstart from the top
+without noticing step 3 never stopped) and every request afterward gets `HTTP 401
+{"code":"unknown_key"}` — a real, seen-in-practice failure, not hypothetical: roundhouse is up,
+`keys.local.json` and `control-plane.json` agree with each other on disk, but neither matches
+the key hash the *running process* loaded minutes or hours earlier. Fix: restart roundhouse
+(step 3 again) so it re-reads the file mint_keys.py just wrote.
+
+```bash
+# --- 3. Launch roundhouse -- a THIRD terminal, leave it running ---
+TOKENIZER=$(find ~/.cache/huggingface/hub/models--Qwen--Qwen2.5-Coder-32B-Instruct \
+  -name tokenizer.json | head -1)   # or wherever your HF_HOME cache put it
+INFERENCE_API_KEY=unused-for-local-only-demo \
+ROUNDHOUSE_CATALOG=use-cases/openjev-demo/catalog.json \
+ROUNDHOUSE_CONTROL_PLANE=use-cases/openjev-demo/control-plane.json \
+ROUNDHOUSE_LOCAL_ENDPOINT=http://127.0.0.1:8000 \
+ROUNDHOUSE_LOCAL_MODEL=Qwen/Qwen2.5-Coder-32B-Instruct \
+ROUNDHOUSE_LOCAL_TOKENIZER="$TOKENIZER" \
+ROUNDHOUSE_LOCAL_KV_EVENTS_ENDPOINT=tcp://127.0.0.1:20080 \
+ROUNDHOUSE_LOCAL_ENABLE_SCORE=1 \
+cargo run --release -p roundhouse-server --bin roundhouse
+# Wait for "roundhouse listening" and "local fleet: real log-probability scoring enabled
+# at /v1/local/score" in its log -- the second line confirms ROUNDHOUSE_LOCAL_ENABLE_SCORE
+# was actually picked up, not just that roundhouse started.
+```
+
+```bash
+# --- 4. Run it, in a FOURTH terminal ---
+cd <roundhouse-repo-root>
+python3 use-cases/openjev-demo/run_score.py
+```
+
+**What success looks like:** 5 tickets, each with 3 answers carrying a real `probability`/
+`confidence` (not `UNPARSED(...)`, not an error) — `department` should resolve crisply
+(confidence at or near 1.000) on every ticket. See "Real run, `run_score.py`" further down for
+the actual output this produced, to compare against.
+
+**Two failure modes, two different fixes — read the error message to tell them apart:**
+
+- **`score_failed`/connection error mentioning `127.0.0.1:8000`** — roundhouse correctly
+  reporting it can't reach Dynamo. Go back to step 0. Dynamo (step 1) is a separate set of
+  processes from roundhouse (step 3); either can die independently of the other (a closed
+  terminal, a box reboot, a previous session ending), and roundhouse gives no indication of
+  Dynamo's state until a request actually needs it.
+- **`HTTP 401 {"code":"unknown_key"}`** — Dynamo is fine; roundhouse's *in-memory* key doesn't
+  match what's on disk right now, almost always because step 2 (`mint_keys.py`) got re-run
+  after step 3 (roundhouse) was already up. Fix: re-run step 3 to restart roundhouse — it will
+  pick up whatever `control-plane.json` currently says. See step 2's own note above for why
+  this happens.
 
 ## Files
 
@@ -109,21 +205,37 @@ file's `$comment`.
 
 ## Reusing an existing worker
 
-If `cache-aware-routing`'s Dynamo worker is already serving (the normal case if you ran that
-use case first), this use case needs **no additional GPU setup at all** — it points at the
-same `http://127.0.0.1:8000` endpoint and the same `tcp://127.0.0.1:20080` KV-events stream.
-Skip straight to "Run it" below.
+This use case points at `http://127.0.0.1:8000` (Dynamo's HTTP frontend) and
+`tcp://127.0.0.1:20080` (its KV-events stream) — the same worker `cache-aware-routing` uses.
+If that worker is already serving, this use case needs **no additional GPU setup at all** — the
+"Quickstart" section above already includes the check (its step 0) and the spin-up commands
+(its step 1) inline, so this section only adds the parts that aren't part of the normal path:
 
-If nothing is serving yet, follow `cache-aware-routing/DYNAMO_LOCAL_SERVING.md` end to end
-first (it is the authoritative, tested reproduction — this use case does not duplicate it),
-then come back here.
+**Why the failure is confusing.** roundhouse itself can be running fine on `:8080` while Dynamo
+on `:8000` is not (a process died, the box rebooted, a previous session ended) — and when that
+happens, `run_score.py`/`run.py` fail with a *roundhouse* error that's easy to misread as a
+roundhouse bug:
+```
+/v1/local/score -> HTTP 400: {"error":{"code":"score_failed","message":"http://127.0.0.1:8000/v1/completions:
+  request failed: error sending request for url (http://127.0.0.1:8000/v1/completions)"}}
+```
+That message is roundhouse correctly reporting that *it* can't reach Dynamo — not that
+roundhouse itself is broken. See the Quickstart's step 0 for the one-line check, and re-run it
+any time this error shows up, since either process (roundhouse or Dynamo) can die independently
+of the other with no warning from the one still running.
 
 **Restarting only the frontend** (e.g. to pick up a new roundhouse env var without reloading
 weights) — use `cache-aware-routing/shutdown_served_model.sh --frontend`, not Ctrl+C on
-`serve_model.sh`'s own terminal. See that script's own header for why the difference matters:
-`serve_model.sh` ties the frontend and the worker to one shell's `trap ... EXIT`, so killing
-either from inside that shell takes both down together and costs several minutes reloading
-32B of weights for a change that only touched the frontend.
+`serve_model.sh`'s own terminal, and not by closing the Quickstart's step-1b terminal either.
+See that script's own header for why the difference matters: `serve_model.sh` (and a manually
+backgrounded frontend+worker pair in one shell) ties both to one shell's exit, so killing either
+from inside that shell takes both down together and costs several minutes reloading 32B of
+weights for a change that only touched the frontend.
+
+**First time on this box, nothing installed yet?** Follow `ENVIRONMENT_SETUP.md` end to end
+(clones Dynamo, builds its Python bindings, downloads the model weights) or
+`cache-aware-routing/DYNAMO_LOCAL_SERVING.md` for the same steps with more evidence/rationale
+attached — this use case does not duplicate either, then come back here.
 
 ## The `ROUNDHOUSE_LOCAL_ENABLE_SCORE` flag
 
@@ -147,39 +259,60 @@ uses), `main.rs` logs `"local fleet: real log-probability scoring enabled at
 
 ## Run it
 
-**Step 1 — one-time setup:**
-```bash
-python3 use-cases/openjev-demo/mint_keys.py
-```
+The commands are in "Quickstart" above (mint keys → launch roundhouse → run a script) — this
+section is the two things worth knowing *about* those commands rather than a second copy of
+them:
 
-**Step 2 — launch roundhouse with the local fleet wired in** (leave running):
-```bash
-TOKENIZER=$(find /ephemeral/cache/huggingface/hub/models--Qwen--Qwen2.5-Coder-32B-Instruct \
-  -name tokenizer.json | head -1)   # or wherever your HF cache put it
-INFERENCE_API_KEY=unused-for-local-only-demo \
-ROUNDHOUSE_CATALOG=use-cases/openjev-demo/catalog.json \
-ROUNDHOUSE_CONTROL_PLANE=use-cases/openjev-demo/control-plane.json \
-ROUNDHOUSE_LOCAL_ENDPOINT=http://127.0.0.1:8000 \
-ROUNDHOUSE_LOCAL_MODEL=Qwen/Qwen2.5-Coder-32B-Instruct \
-ROUNDHOUSE_LOCAL_TOKENIZER="$TOKENIZER" \
-ROUNDHOUSE_LOCAL_KV_EVENTS_ENDPOINT=tcp://127.0.0.1:20080 \
-ROUNDHOUSE_LOCAL_ENABLE_SCORE=1 \
-cargo run --release -p roundhouse-server --bin roundhouse
-```
-`ROUNDHOUSE_LOCAL_ENABLE_SCORE` is **required** for `run_score.py` — it is a separate, off-by-default
-opt-in from the four `ROUNDHOUSE_LOCAL_*` variables above (crates/roundhouse-server/src/local_score.rs).
-Without it, `/v1/local/score` simply does not exist (404) and `run.py` (which doesn't need it) still
-works unchanged — see "The `ROUNDHOUSE_LOCAL_ENABLE_SCORE` flag" below for why this is a separate
-switch rather than following automatically from the endpoint being set.
+- **`ROUNDHOUSE_LOCAL_ENABLE_SCORE` is required for `run_score.py`.** It's a separate,
+  off-by-default opt-in from the four `ROUNDHOUSE_LOCAL_*` variables (see
+  `crates/roundhouse-server/src/local_score.rs`). Without it, `/v1/local/score` simply does not
+  exist (404) — `run.py`, which doesn't call that route, still works unchanged either way. See
+  "The `ROUNDHOUSE_LOCAL_ENABLE_SCORE` flag" below for why this is its own switch rather than
+  following automatically from the endpoint being set.
+- **`ROUNDHOUSE_FRONTIER_UPSTREAM` is deliberately left unset.** This deployment never
+  dispatches to the frontier, so the offline echo stub standing in for it is fine; see
+  `main.rs`'s own log line at boot ("no frontier upstream configured ... serving the offline
+  echo stub").
 
-`ROUNDHOUSE_FRONTIER_UPSTREAM` is deliberately left unset — this deployment never dispatches
-to the frontier, so the offline echo stub standing in for it is fine; see `main.rs`'s own log
-line at boot ("no frontier upstream configured ... serving the offline echo stub").
+`run_score.py` and `run.py` can both be run against the same roundhouse process, one after the
+other — `run_score.py` for real calibrated scoring, `run.py` as the prompted-classification
+comparison point. See "Which script do I run?" below for the full script comparison, including
+the two benchmark scripts this section doesn't cover.
 
-**Step 3 — run the demo:**
+## Which script do I run?
+
+Four scripts, two different purposes — routing demos (go through roundhouse, prove the
+integration) versus a tokenomics benchmark (bypass roundhouse, measure Dynamo/vLLM's serving
+cost directly). Reach for the one that matches what you're actually trying to show:
+
+| Script | Goes through roundhouse? | What it's for | Needs |
+|---|---|---|---|
+| `run.py` | ✅ `/v1/responses` | Prove roundhouse can route a Jev-shaped workload to the local worker at all, with a free-text answer parsed client-side. The `INTEGRATION.md` "Option C" comparison point — approximate answers, but the simplest path. | roundhouse running (Step 2, `ROUNDHOUSE_LOCAL_ENABLE_SCORE` not required) |
+| `run_score.py` | ✅ `/v1/local/score` | The real integration demo: real, calibrated `probability`/`confidence` per answer, `open-jev`'s own math ported verbatim, dispatched through roundhouse. Use this to show "roundhouse can serve a genuine Jev-style decision layer," not just an approximation. | roundhouse running **with** `ROUNDHOUSE_LOCAL_ENABLE_SCORE=1` (Step 2 as written above) |
+| `run_with_openjev.py` | ❌ direct to Dynamo | **Benchmark, not a demo.** Same real logprob-scoring mechanism as `run_score.py`, but instrumented per LLM call (KV-cache %, cold-start, prefill/decode split, token counts) and dumped to `results/with_openjev.json`. Use this (paired with `run_without_jev.py`) to measure the tokenomics claim, not to demonstrate roundhouse routing. | Dynamo serving on `:8000` directly — **no roundhouse process needed**; Dynamo venv active (`source ~/dynamo/.venv/bin/activate`) and `ROUNDHOUSE_LOCAL_TOKENIZER` set |
+| `run_without_jev.py` | ❌ direct to Dynamo | The tokenomics benchmark's baseline half: one structured-JSON-generation call per ticket, no logprob flag, same instrumentation, dumped to `results/without_jev.json`. Meaningless on its own — always run alongside `run_with_openjev.py`. | Dynamo serving on `:8000` directly — no roundhouse, no tokenizer/venv needed (sends text, not token ids) |
+
+**If you're demonstrating the integration** (roundhouse routes to a local Jev-style scorer):
+`run_score.py`, optionally alongside `run.py` to show the free-text fallback it replaces.
+
+**If you're measuring cost/latency** (does Jev's "ultra-low latency, massive cost reduction"
+claim hold up): run the benchmark pair below, **not** `run_score.py`/`run.py` — see
+"Tokenomics" further down for why this needs its own scripts and its own clean-restart
+protocol rather than reusing the roundhouse-routed ones.
+
 ```bash
-python3 use-cases/openjev-demo/run_score.py   # real, calibrated log-probability scoring
-python3 use-cases/openjev-demo/run.py         # prompted-classification comparison point
+# Tokenomics benchmark — cold-restart Dynamo before EACH condition, or the second
+# run's KV cache will be biased by whatever the first run already warmed.
+source ~/dynamo/.venv/bin/activate
+export ROUNDHOUSE_LOCAL_TOKENIZER=/path/to/tokenizer.json
+
+use-cases/cache-aware-routing/shutdown_served_model.sh --worker
+# ... relaunch the worker (see DYNAMO_LOCAL_SERVING.md) and wait for "chat endpoints enabled" ...
+python3 use-cases/openjev-demo/run_with_openjev.py     # -> results/with_openjev.json
+
+use-cases/cache-aware-routing/shutdown_served_model.sh --worker
+# ... relaunch the worker again, wait for ready ...
+python3 use-cases/openjev-demo/run_without_jev.py      # -> results/without_jev.json
 ```
 
 ## Expected output
