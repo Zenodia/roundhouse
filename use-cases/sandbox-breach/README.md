@@ -508,6 +508,10 @@ are up.)
    blocks in the foreground for as long as the worker serves; open a fresh terminal for it and
    leave it there:
    ```bash
+   # etcd + nats are required by Dynamo — start them first (idempotent, safe to re-run)
+   cd /home/ubuntu/dynamo && docker compose -f dev/docker-compose.yml up -d
+   sleep 3
+
    source /home/ubuntu/dynamo/.venv/bin/activate
    cd /home/ubuntu/roundhouse/use-cases/cache-aware-routing
    MODEL=Qwen/Qwen2.5-7B-Instruct bash ./serve_model.sh serve

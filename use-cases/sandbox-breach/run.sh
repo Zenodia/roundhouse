@@ -37,7 +37,12 @@ cmd_up() {
 
   echo "[*] Dynamo/Qwen local worker"
   if ! curl -sf -o /dev/null http://127.0.0.1:8000/v1/models; then
-    docker start dev-etcd-server-1 dev-nats-server-1 >/dev/null 2>&1 || true
+    # Try to start existing containers; if they don't exist yet (cold machine),
+    # bring them up via docker compose so they're created for future runs too.
+    if ! docker start dev-etcd-server-1 dev-nats-server-1 >/dev/null 2>&1; then
+      ( cd "${DYNAMO_CLONE}" && docker compose -f dev/docker-compose.yml up -d )
+      sleep 3
+    fi
     ( source "${DYNAMO_CLONE}/.venv/bin/activate" && \
       cd "${HERE}/../cache-aware-routing" && \
       MODEL="${LOCAL_MODEL}" nohup bash ./serve_model.sh serve > /tmp/sandbox-breach-dynamo.log 2>&1 & )
