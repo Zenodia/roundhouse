@@ -1,0 +1,62 @@
+# OPTIONAL dev-loop overlay — Claude Code sandbox wired to the memory skill.
+#
+# ---------------------------------------------------------------------------
+# WHAT THIS IS
+# ---------------------------------------------------------------------------
+# A SHORTCUT to validate the breakout mechanics WITHOUT standing up the full
+# OpenShell gateway + NemoClaw. It runs a container from the OpenShell base
+# sandbox image (which ships Claude Code) on the same Docker network as the
+# vulnerable `memory-mcp` service, with:
+#   - the memory-recall Agent Skill mounted at ~/.claude/skills/memory-recall
+#   - the exploit bundles mounted at /opt/exploits
+#   - MEMORY_MCP_URL / SERVER_URL pointing at the memory-mcp service
+#
+# This is NOT the real OpenShell isolation boundary. It is a convenience for
+# iterating on the skill + exploit. For the true OpenClaw-in-OpenShell topology,
+# use the gateway path in openshell/README.md (Path A).
+#
+# ---------------------------------------------------------------------------
+# HOW TO USE  (must be combined with the memory-mcp compose file)
+# ---------------------------------------------------------------------------
+#   cd openshell
+#   docker compose \
+#     -f docker-compose.memory-mcp.yml \
+#     -f docker-compose.override.yml \
+#     up -d --build
+#
+#   # open a shell "inside the sandbox":
+#   docker exec -it claude-sandbox bash
+#   # then run an exploit from inside:
+#   python /opt/exploits/01-CWE-78-mcp-user-id-command-injection/exploit_client.py --mode exploit
+#
+#   # verify OUTSIDE the sandbox (on the host):
+#   cat host_breakout_marker/MARKINJECT_BREAKOUT_*
+
+services:
+  claude-sandbox:
+    image: ghcr.io/nvidia/openshell-community/sandboxes/base:latest
+    container_name: claude-sandbox
+    depends_on:
+      - memory-mcp
+    # Keep the container alive; install the MCP client used by the skill/exploit.
+    command: ["sh", "-c", "pip install -q fastmcp >/dev/null 2>&1 || true; sleep infinity"]
+    working_dir: /root
+    environment:
+      # The memory server is reachable by its compose service name on the
+      # shared project network — this is the "outside the sandbox" endpoint.
+      MEMORY_MCP_URL: "http://memory-mcp:8999/mcp"
+      SERVER_URL: "http://memory-mcp:8999/mcp"
+      # Convenience only: lets the in-sandbox exploit_client verify the marker.
+      # In the REAL OpenShell topology the sandbox CANNOT see the host FS, so you
+      # would verify the marker on the host instead (see README Path A).
+      MARKER_DIR: "/workspace/mnt"
+      # Optional — only needed if you actually drive the `claude` CLI:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    volumes:
+      # The MCP client wrapped as a Claude Code Agent Skill.
+      - ./skills/memory-recall:/root/.claude/skills/memory-recall:ro
+      # The exploit bundles, so you can run them from inside the sandbox.
+      - ../exploits:/opt/exploits:ro
+      # Read-only view of the host marker dir so the in-sandbox exploit_client
+      # can confirm the marker the server wrote OUTSIDE the sandbox.
+      - ./host_breakout_marker:/workspace/mnt:ro

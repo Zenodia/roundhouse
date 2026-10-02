@@ -1,0 +1,12 @@
+langchain-core==0.3.63 
+langchain 
+openai 
+langchain-openai 
+langchain-nvidia-ai-endpoints 
+langchain-community 
+langgraph 
+langgraph-checkpoint 
+fastmcp==2.11.3  
+openapi-pydantic==0.5.1
+colorama
+nvidia-haystack==0.1.2

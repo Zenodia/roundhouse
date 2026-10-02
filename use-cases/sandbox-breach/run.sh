@@ -21,7 +21,8 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BREAKOUT_LAB="${BREAKOUT_LAB:-/home/ubuntu/breakout-lab}"
+REPO_ROOT="$(cd "${HERE}/../.." && pwd)"
+BREAKOUT_LAB="${BREAKOUT_LAB:-${REPO_ROOT}/labs/breakout-lab}"
 DYNAMO_CLONE="${DYNAMO_CLONE:-/home/ubuntu/dynamo}"
 ROUNDHOUSE_BIN="${ROUNDHOUSE_BIN:-${HERE}/../../target/release/roundhouse}"
 SANDBOX_NAME="${SANDBOX_NAME:-sandbox-breach-demo}"

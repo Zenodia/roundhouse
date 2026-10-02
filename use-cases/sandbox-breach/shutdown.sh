@@ -25,7 +25,8 @@ KEEP_INFRA=0
 [[ "${1:-}" == "--keep-infra" ]] && KEEP_INFRA=1
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BREAKOUT_LAB="${BREAKOUT_LAB:-/home/ubuntu/breakout-lab}"
+REPO_ROOT="$(cd "${HERE}/../.." && pwd)"
+BREAKOUT_LAB="${BREAKOUT_LAB:-${REPO_ROOT}/labs/breakout-lab}"
 SANDBOX_NAME="${SANDBOX_NAME:-sandbox-breach-demo}"
 
 step() { echo; echo "[*] $*"; }

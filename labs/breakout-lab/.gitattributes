@@ -1,0 +1,14 @@
+# Normalize line endings. Keep LF for everything so shell scripts and Python
+# run correctly on Linux (the exploit .sh scripts MUST be LF to execute on Ubuntu).
+* text=auto eol=lf
+
+*.sh   text eol=lf
+*.py   text eol=lf
+*.md   text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.diff text eol=lf
+*.json text eol=lf
+
+# Treat notebooks and binary-ish assets as binary (no EOL munging).
+*.ipynb -text

@@ -1,0 +1,33 @@
+# Lightweight image for the (vulnerable) memory MCP server.
+#
+# This is the component that runs OUTSIDE the OpenShell sandbox. The OpenClaw
+# agent, running INSIDE a sandbox, reaches this server over the MCP protocol via
+# the memory-recall Agent Skill. A vulnerability in this server lets the agent
+# execute code here — i.e. outside its sandbox.
+#
+# NOTE: unlike the repo's root Dockerfile, this image does NOT install
+# faiss-gpu / heavy GPU deps. The memory server uses langchain's
+# InMemoryVectorStore, so only the lightweight deps below are required to import
+# and serve the tools.
+FROM python:3.12-slim
+
+WORKDIR /workspace
+COPY . /workspace
+
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir \
+        fastmcp \
+        python-dotenv \
+        nest_asyncio \
+        colorama \
+        "langchain==0.3.7" \
+        "langchain-core==0.3.63" \
+        langgraph \
+        langchain-community \
+        langchain-nvidia-ai-endpoints \
+        langchain-openai
+
+EXPOSE 8999
+
+# The root Dockerfile's CMD is `python memory_mcp_server` (missing .py); fix it.
+CMD ["python", "memory_mcp_server.py"]
