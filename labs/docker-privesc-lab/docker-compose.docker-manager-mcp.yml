@@ -1,0 +1,41 @@
+# Docker Manager MCP server — the component that runs OUTSIDE the OpenShell sandbox.
+#
+# The agent inside a sandbox reaches this server over MCP via the docker-manage
+# Agent Skill (manage.py). Two tools in this server are deliberately vulnerable:
+#   run_container  — VULN-01 CWE-269: passes caller-supplied privileged flag +
+#                    volume mounts directly to the Docker daemon
+#   apply_compose  — VULN-02 CWE-269+CWE-78: pipes caller-supplied YAML into
+#                    'docker compose -f -' via stdin; no file written to disk
+#
+# /var/run/docker.sock gives this server full Docker daemon access — which is
+# itself the privilege escalation enabler. The exploits then use that access
+# to launch a privileged container with a host root mount.
+#
+# Usage (from docker-privesc-lab/):
+#   docker compose -f docker-compose.docker-manager-mcp.yml up -d --build
+
+services:
+  docker-manager-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile.docker-manager-mcp
+    image: docker-manager-mcp:latest
+    container_name: docker-manager-mcp
+    restart: unless-stopped
+
+    ports:
+      - "8998:8998"
+
+    environment:
+      COMPOSE_DIR: /workspace/compose-files
+      stream: "no"
+
+    volumes:
+      # Docker socket — gives the server full daemon access (the vuln enabler).
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Pre-approved compose files directory (negative control target).
+      - ./compose-files:/workspace/compose-files:ro
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+      - "host.openshell.internal:host-gateway"

@@ -1,0 +1,74 @@
+{
+  "$comment": [
+    "docker-privesc control plane. Two projects, one per A/B leg:",
+    "  'docker-privesc-local'    \u2192 local/* (Dynamo-served Qwen)",
+    "  'docker-privesc-frontier' \u2192 nvidia-inference-api/* (claude-opus-5)",
+    "The same agent, same skill, same exploit payload routes to a different backend",
+    "purely by which turn key the sandbox was handed \u2014 showing the privilege",
+    "escalation is architectural (Docker daemon trust), not model-dependent.",
+    "Run mint_keys.py to populate key_sha256 fields; secrets go to keys.local.json (gitignored)."
+  ],
+  "projects": [
+    {
+      "id": "docker-privesc-local",
+      "name": "Docker Privesc -- Local Qwen Leg",
+      "policy": {
+        "min_quality": 0.0,
+        "allow": [
+          "local/*"
+        ]
+      },
+      "credentials": {
+        "mode": "project_only",
+        "providers": {
+          "nvidia-inference-api": {
+            "env_var": "INFERENCE_API_KEY",
+            "kind": "api_key"
+          }
+        }
+      }
+    },
+    {
+      "id": "docker-privesc-frontier",
+      "name": "Docker Privesc -- Frontier Opus 5 Leg",
+      "policy": {
+        "min_quality": 0.0,
+        "allow": [
+          "nvidia-inference-api/*"
+        ]
+      },
+      "credentials": {
+        "mode": "project_only",
+        "providers": {
+          "nvidia-inference-api": {
+            "env_var": "INFERENCE_API_KEY",
+            "kind": "api_key"
+          }
+        }
+      }
+    }
+  ],
+  "users": [
+    {
+      "id": "openclaw-local"
+    },
+    {
+      "id": "openclaw-frontier"
+    }
+  ],
+  "keys": [
+    {
+      "project": "docker-privesc-local",
+      "user": "openclaw-local",
+      "key_sha256": "6c95f40f43c1cef72e95e0f928f6e795040a126c19dce6b190e023533ccb3fdd"
+    },
+    {
+      "project": "docker-privesc-frontier",
+      "user": "openclaw-frontier",
+      "key_sha256": "84a3d0cec48fca67bfb0b710f966e08ded4ac9cedd7e3d8d8f762dc693f5b9db"
+    }
+  ],
+  "admin_keys": [
+    "3d5e1d5178173a68dc2e4fd50e8d55e3770d0b5d895b848546911cde3b9f02fe"
+  ]
+}

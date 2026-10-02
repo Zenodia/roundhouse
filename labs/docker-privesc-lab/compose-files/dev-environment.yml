@@ -1,0 +1,14 @@
+# Pre-existing "dev environment" compose file.
+# This is the negative control target: run_named_compose("dev-environment")
+# detects 'privileged: true' and '- /:/host' and rejects this file,
+# demonstrating that keyword-based detection catches Path B (file-write attack).
+# Path C (run_container with inline params) and Path D (apply_compose with
+# YAML string) bypass this detection entirely.
+version: '3'
+services:
+  dev:
+    image: alpine
+    privileged: true
+    volumes:
+      - /:/host
+    command: echo "dev environment ready"

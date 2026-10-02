@@ -1,0 +1,30 @@
+id: roundhouse
+resource_version: 1
+display_name: Roundhouse (local docker-privesc demo)
+description: Routes the sandboxed agent's reasoning-LLM calls through the roundhouse turn/routing layer instead of directly to a model provider.
+category: agent
+credentials:
+  - name: api_key
+    description: Sentinel Anthropic-shaped API key (public, not a real credential)
+    env_vars:
+      - ANTHROPIC_API_KEY
+    required: true
+    auth_style: header
+    header_name: x-api-key
+    query_param: ""
+endpoints:
+  - host: host.openshell.internal
+    port: 8080
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+binaries:
+  - /usr/bin/claude
+  - /usr/local/bin/claude
+  - /sandbox/.venv/bin/nemo-relay
+inference_capable: true
+discovery:
+  credentials:
+    - api_key
+source: user
+scope: platform
