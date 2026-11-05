@@ -472,11 +472,18 @@ pub struct LocalExecution {
 /// would then prefill a token stream whose blocks hash differently from the
 /// ones we matched against, and overlap would be zero forever. Dynamo engines
 /// take prompt token ids directly, so passing them through costs nothing.
+///
+/// `model` is the served name the quote named (`LocalQuote::model_name`),
+/// carried separately from `endpoint` because the two are not one-to-one: a
+/// Dynamo frontend serves every registered model behind one port, so a fleet
+/// holding a source and a target model of one family (the cross-model KV
+/// transfer pair) is told apart only by the name on the wire.
 #[async_trait]
 pub trait LocalExecutor: Send + Sync + 'static {
     async fn execute(
         &self,
         endpoint: &str,
+        model: &str,
         prompt_tokens: &[u32],
         expected_output_tokens: Option<u32>,
     ) -> Result<LocalExecution, FleetError>;
@@ -500,6 +507,7 @@ impl LocalExecutor for EchoLocalExecutor {
     async fn execute(
         &self,
         _endpoint: &str,
+        _model: &str,
         _prompt_tokens: &[u32],
         _expected_output_tokens: Option<u32>,
     ) -> Result<LocalExecution, FleetError> {
@@ -525,6 +533,25 @@ pub const DEFAULT_LOCAL_BASE_TTFT_MS: f64 = 60.0;
 /// can set it, and its "unset" default must be this one.
 pub const DEFAULT_FLEET_QUOTE_DEADLINE_MS: u64 = 500;
 
+/// A local model besides the primary one, quoted and routable on every turn
+/// the primary is.
+///
+/// This is the shape a cross-model KV cache transfer experiment needs: a
+/// source and a target model of one family (matched KV head count and head
+/// dimension, one tokenizer) both resident on the fleet, so the router sees a
+/// candidate per model and the log records which one served each turn. The
+/// tokenizer is the engine's single `T`, deliberately — two models whose
+/// block hashes must be comparable across a handoff must tokenize alike, and
+/// an engine cannot hash a buffer two ways.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LocalModelConfig {
+    /// The served name, as registered on the fleet and sent on the wire.
+    pub model: String,
+    /// Capability relative to the frontier catalog, the same axis as
+    /// [`EngineConfig::local_quality_prior`].
+    pub quality_prior: f64,
+}
+
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
     /// Identity presented to the session lease.
@@ -538,6 +565,11 @@ pub struct EngineConfig {
     pub routing_group: String,
     /// Capability of the local model relative to the frontier catalog.
     pub local_quality_prior: f64,
+    /// Further local models beyond `local_model`, each quoted against the
+    /// same fleet and routing group on every turn. Empty on every deployment
+    /// that serves one local model, which keeps the single-model path
+    /// byte-identical to before this field existed. See [`LocalModelConfig`].
+    pub extra_local_models: Vec<LocalModelConfig>,
     /// Latency floor attributed to a local worker before prefill.
     ///
     /// Deployment-settable, like the slope below: the catalog carries both, so
@@ -604,6 +636,7 @@ impl Default for EngineConfig {
             local_model: "local".to_string(),
             routing_group: "default".to_string(),
             local_quality_prior: 0.6,
+            extra_local_models: Vec::new(),
             local_base_ttft_ms: DEFAULT_LOCAL_BASE_TTFT_MS,
             local_ttft_ms_per_prefill_token: 0.0,
             fleet_quote_deadline_ms: DEFAULT_FLEET_QUOTE_DEADLINE_MS,
@@ -2273,42 +2306,90 @@ impl<S: SessionStore, T: Tokenizer + Clone + 'static> Engine<S, T> {
             isl_tokens as u64,
             self.config.expected_output_tokens as u64,
         );
-        let (local_quote, local_quote_skipped) =
-            match (&self.fleet, self.local_quote_skip(declarations, admission)) {
-                (Some(fleet), None) => {
+        // One quote per local model the fleet holds: the primary
+        // `local_model`, then each of `extra_local_models`. Each quote is
+        // paired with the quality prior it is priced at, because the two
+        // models of a cross-model pair are by construction different sizes
+        // and the router must see that difference or it would pick between
+        // them by load alone. The primary's skip reason is the turn's skip
+        // reason (the tool arm and the policy arm apply to every local model
+        // alike); an extra model whose own identity the policy keeps out is
+        // simply not quoted, which is what a policy that names no such
+        // target asked for.
+        let (local_quotes, local_quote_skipped): (
+            Vec<(LocalQuote, f64)>,
+            Option<LocalQuoteSkip>,
+        ) = match (&self.fleet, self.local_quote_skip(declarations, admission)) {
+            (Some(fleet), None) => {
+                let can_fail_open = frontier_quotes.iter().any(|candidate| {
+                    hosted_fallback_admitted(
+                        admission,
+                        &session.state().frontier_history,
+                        candidate,
+                    )
+                });
+                let mut quotes = Vec::with_capacity(1 + self.config.extra_local_models.len());
+                let mut first_skip = None;
+                for (model, quality_prior) in self.local_models() {
+                    if model != self.config.local_model
+                        && self
+                            .extra_local_quote_skip(
+                                declarations,
+                                admission,
+                                &model,
+                                quality_prior,
+                            )
+                            .is_some()
+                    {
+                        continue;
+                    }
                     let query = FleetQuery::for_buffer(
                         assembler.buffer(),
-                        self.config.local_model.clone(),
+                        model,
                         self.config.routing_group.clone(),
                         Some(self.config.expected_output_tokens),
                         Some(session.session_id().to_string()),
                     );
-                    let can_fail_open = frontier_quotes.iter().any(|candidate| {
-                        hosted_fallback_admitted(
-                            admission,
-                            &session.state().frontier_history,
-                            candidate,
+                    let (quote, skipped) = self
+                        .local_quote(
+                            fleet.as_ref(),
+                            &query,
+                            deadline_at,
+                            can_fail_open,
+                            session,
                         )
-                    });
-                    self.local_quote(fleet.as_ref(), &query, deadline_at, can_fail_open, session)
-                        .await?
+                        .await?;
+                    if let Some(quote) = quote {
+                        quotes.push((quote, quality_prior));
+                    }
+                    if first_skip.is_none() {
+                        first_skip = skipped;
+                    }
                 }
-                (_, skipped) => (None, skipped),
-            };
+                // A fail-open timeout is reported only when it left the
+                // turn with no local candidate at all; a pair where one
+                // model answered in time is a routed turn, not a skipped one.
+                let skipped = if quotes.is_empty() { first_skip } else { None };
+                (quotes, skipped)
+            }
+            (_, skipped) => (Vec::new(), skipped),
+        };
 
         let mut candidates: Vec<Candidate> = Vec::new();
-        if let Some(quote) = &local_quote {
+        for (quote, quality_prior) in &local_quotes {
             // Output priced at the same `expected_output_tokens` the hosted
             // quotes above were given, so a local and a hosted dollar figure
             // are estimates of the same turn.
             candidates.push(quote.to_candidate(
-                self.config.local_quality_prior,
+                *quality_prior,
                 self.config.local_base_ttft_ms,
                 self.config.local_ttft_ms_per_prefill_token,
                 self.config.local_capacity_price,
                 self.config.expected_output_tokens,
             ));
         }
+        let local_quotes: Vec<LocalQuote> =
+            local_quotes.into_iter().map(|(quote, _)| quote).collect();
         candidates.extend(frontier_quotes);
 
         // --- a tool-declaring turn cannot go to a local worker ---------------
@@ -2903,7 +2984,7 @@ impl<S: SessionStore, T: Tokenizer + Clone + 'static> Engine<S, T> {
                     self.connect_local(
                         &target,
                         &assembler,
-                        local_quote.as_ref(),
+                        &local_quotes,
                         // The *conversation's* count, not the request's: the
                         // local worker receives the prompt buffer and no
                         // toolbox at all, so handing it the tools-inclusive
@@ -3180,15 +3261,20 @@ impl<S: SessionStore, T: Tokenizer + Clone + 'static> Engine<S, T> {
         &self,
         target: &Target,
         assembler: &ContextAssembler<T>,
-        local_quote: Option<&LocalQuote>,
+        // Every local quote this turn obtained, one per local model; the one
+        // whose target the router chose is the one dispatched.
+        local_quotes: &[LocalQuote],
         // The conversation's own token count — deliberately *not* the turn's
         // tools-inclusive `isl_tokens`; see the call site (F4).
         conversation_tokens: usize,
         deadline_at: Instant,
     ) -> Result<FrontierStream, ConnectFailure> {
-        let quote = local_quote.ok_or_else(|| {
-            ConnectFailure::terminal(EngineError::UnresolvableTarget(target.clone()))
-        })?;
+        let quote = local_quotes
+            .iter()
+            .find(|quote| &quote.target() == target)
+            .ok_or_else(|| {
+                ConnectFailure::terminal(EngineError::UnresolvableTarget(target.clone()))
+            })?;
         let fleet = self.fleet.as_ref().ok_or_else(|| {
             ConnectFailure::terminal(EngineError::UnresolvableTarget(target.clone()))
         })?;
@@ -3282,6 +3368,7 @@ impl<S: SessionStore, T: Tokenizer + Clone + 'static> Engine<S, T> {
             deadline_at,
             self.local_executor.execute(
                 &quote.endpoint,
+                &quote.model_name,
                 prompt_tokens,
                 Some(self.config.expected_output_tokens),
             ),

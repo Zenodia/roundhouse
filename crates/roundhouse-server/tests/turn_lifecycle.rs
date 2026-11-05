@@ -72,6 +72,7 @@ impl LocalExecutor for SlowLocalExecutor {
     async fn execute(
         &self,
         _endpoint: &str,
+        _model: &str,
         _prompt_tokens: &[u32],
         _expected_output_tokens: Option<u32>,
     ) -> Result<LocalExecution, FleetError> {
@@ -246,6 +247,7 @@ impl LocalExecutor for HangingLocalExecutor {
     async fn execute(
         &self,
         _endpoint: &str,
+        _model: &str,
         _prompt_tokens: &[u32],
         _expected_output_tokens: Option<u32>,
     ) -> Result<LocalExecution, FleetError> {

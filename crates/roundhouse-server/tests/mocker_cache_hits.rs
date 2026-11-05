@@ -90,6 +90,7 @@ impl LocalExecutor for MockerExecutor {
     async fn execute(
         &self,
         _endpoint: &str,
+        _model: &str,
         prompt_tokens: &[u32],
         expected_output_tokens: Option<u32>,
     ) -> Result<LocalExecution, FleetError> {

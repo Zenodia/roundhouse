@@ -57,19 +57,20 @@ use roundhouse_core::store::SessionStore;
 use roundhouse_core::validate::{Validator, ValidatorConfig};
 use roundhouse_fleet::{
     AnthropicMessagesClient, DEFAULT_API_BASE, DEFAULT_PASS_THROUGH_BASE, EchoFrontierClient,
-    FrontierClient, FrontierClients, FrontierModelSpec, OpenAiResponsesClient,
+    FrontierClient, FrontierClients, FrontierModelSpec, LocalFleet, OpenAiResponsesClient,
     StaticFrontierCatalog, WireProtocol,
 };
 use roundhouse_mcp::ControlStore;
 use roundhouse_server::catalog_config::{BUILT_IN_OPENAI, ProviderConfig};
 use roundhouse_server::control_config::crosscheck::CrossChecks;
+use roundhouse_server::local_fleet::{self, LocalFleetSetup, RuntimeTokenizer};
 use roundhouse_server::routing_composition::{EngineParts, RoutingComposition};
 use roundhouse_server::{
     Backends, CLASSIFY_VAR, ControlDirectory, ControlPlane, ControlPlaneReads, Conversations,
-    DirectoryError, EchoLocalExecutor, EngineConfig, FleetJudge, JudgeConfig, REDIS_NAMESPACE_VAR,
-    REDIS_VAR, admin_api, catalog_config, classify_config, classify_runtime, control_config, http,
-    mcp_api, messages_api, metrics_api, relay_api, resolve_namespace, responses_api,
-    routing_composition, shared_backend,
+    DirectoryError, EchoLocalExecutor, EngineConfig, FleetJudge, JudgeConfig, LocalExecutor,
+    REDIS_NAMESPACE_VAR, REDIS_VAR, admin_api, catalog_config, classify_config, classify_runtime,
+    control_config, http, mcp_api, messages_api, metrics_api, relay_api, resolve_namespace,
+    responses_api, routing_composition, shared_backend,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -509,13 +510,12 @@ const PROBE_OSL_TOKENS: u64 = 256;
 /// Every target a turn of this process's could actually be routed to, priced
 /// the way the router prices them.
 ///
-/// The catalog and nothing else, because [`serve`] wires no [`LocalFleet`]:
-/// this binary quotes no local candidate, so `local/<model>` names nothing it
-/// could send a turn to and a policy that named only local really would refuse
-/// every turn. A deployment that attaches a fleet adds its local model to this
-/// list at the same site it attaches the fleet — the two facts have to move
-/// together, or the check starts refusing configurations that would in fact
-/// serve.
+/// The catalog alone. `local/<model>` entries are appended by the caller
+/// (`main`), one per worker, and only when [`local_fleet::from_env`] actually
+/// attached a [`LocalFleet`] — the two facts have to move together, or this
+/// check starts refusing configurations that would in fact serve, or
+/// admitting ones that would not. See `local_fleet.rs`'s module doc for why
+/// that wiring lives in its own module rather than here.
 ///
 /// [`LocalFleet`]: roundhouse_fleet::LocalFleet
 fn reachable_candidates(catalog: &StaticFrontierCatalog) -> Vec<Candidate> {
@@ -646,11 +646,51 @@ async fn main() -> anyhow::Result<()> {
     // every write have something to check against.
     let file = control_config::config_from_env()?;
 
+    // Opt-in: `ROUNDHOUSE_LOCAL_ENDPOINT` unset means every deployment's prior
+    // behavior, unchanged. Built before `reachable` so real local candidates
+    // — not the echo stub's absence of one — are what the boot cross-checks
+    // below see, per `reachable_candidates`'s own doc comment.
+    let local_quality = config
+        .as_ref()
+        .map(|c| c.local_quality.clone())
+        .unwrap_or_default();
+    let default_local_quality = config
+        .as_ref()
+        .map(|c| c.default_local_quality)
+        .unwrap_or(engine_config.local_quality_prior);
+    let local_setup = local_fleet::from_env(
+        &local_quality,
+        default_local_quality,
+        engine_config.local_base_ttft_ms,
+    )
+    .await
+        .context("configuring the local fleet from ROUNDHOUSE_LOCAL_* variables")?;
+    match &local_setup {
+        Some(setup) => {
+            for worker in &setup.workers {
+                tracing::info!(
+                    worker_id = worker.worker_id,
+                    model = %worker.model,
+                    endpoint = %worker.endpoint,
+                    routing_group = %setup.routing_group,
+                    "local fleet: real worker registered; local turns can be routed and measured"
+                );
+            }
+        }
+        None => tracing::info!(
+            var = "ROUNDHOUSE_LOCAL_ENDPOINT",
+            "local fleet: not configured; every turn routes to the frontier"
+        ),
+    }
+
     // Both files are loaded now, and only now can they be compared. See the
     // functions: neither loader can see the other, so a policy naming no model
     // this deployment has — or promising a local fallback it does not have —
     // is a mistake nothing before this point could catch.
-    let reachable = reachable_candidates(&catalog);
+    let mut reachable = reachable_candidates(&catalog);
+    if let Some(setup) = &local_setup {
+        reachable.extend(setup.candidates.iter().cloned());
+    }
     // Resolved before the cross-checks because one of them asks about it: a
     // project enrolled in the validate loop on a deployment with no judge is a
     // configuration that would load, serve, and quietly validate nothing.
@@ -815,17 +855,28 @@ async fn main() -> anyhow::Result<()> {
     // refusal in this function stops the process before it opens a socket.
     // This is what makes `compose`'s own doc, which claims exactly this
     // posture, true.
-    let classifier: Option<Arc<classify_runtime::ClassificationRuntime<ByteTokenizer>>> = classify
+    //
+    // Composed over the engine's own tokenizer -- the fleet's HF tokenizer
+    // when a local fleet is configured, the byte tokenizer otherwise -- because
+    // `ClassificationRuntime<T>` is typed on the engine's `T`, and a
+    // classifier that tokenized a turn differently from the engine that
+    // routed it would count tokens the engine never saw.
+    let tokenizer = local_setup
         .as_ref()
-        .map(|(path, config)| {
-            classify_runtime::compose(
-                path,
-                config,
-                Arc::clone(backends.evaluation_spend()),
-                ByteTokenizer,
-                &process_env,
-            )
-        })
+        .map(|setup| setup.tokenizer.clone())
+        .unwrap_or(RuntimeTokenizer::Byte(ByteTokenizer));
+    let classifier: Option<Arc<classify_runtime::ClassificationRuntime<RuntimeTokenizer>>> =
+        classify
+            .as_ref()
+            .map(|(path, config)| {
+                classify_runtime::compose(
+                    path,
+                    config,
+                    Arc::clone(backends.evaluation_spend()),
+                    tokenizer.clone(),
+                    &process_env,
+                )
+            })
         .transpose()?
         .flatten();
     // The supervisor is this deployment's classification lifetime, held for
@@ -898,6 +949,8 @@ async fn main() -> anyhow::Result<()> {
                 classifier,
                 composition,
                 listener,
+                tokenizer,
+                local_setup,
             )
             .await
         }
@@ -923,6 +976,8 @@ async fn main() -> anyhow::Result<()> {
                 classifier,
                 composition,
                 listener,
+                tokenizer,
+                local_setup,
             )
             .await
         }
@@ -967,9 +1022,11 @@ async fn serve<S: SessionStore>(
     reachable: Vec<Candidate>,
     metrics_config: Arc<MetricsConfig>,
     engine_config: EngineConfig,
-    classifier: Option<Arc<classify_runtime::ClassificationRuntime<ByteTokenizer>>>,
+    classifier: Option<Arc<classify_runtime::ClassificationRuntime<RuntimeTokenizer>>>,
     composition: RoutingComposition,
     listener: tokio::net::TcpListener,
+    tokenizer: RuntimeTokenizer,
+    local_setup: Option<LocalFleetSetup>,
 ) -> anyhow::Result<()> {
     let control = Arc::new(ControlStore::new());
     // The judge's own transport, resolved from its own catalog entry's
@@ -1023,6 +1080,31 @@ async fn serve<S: SessionStore>(
         // Preserve the catalog's latency values when adding the control-plane salt.
         ..engine_config
     };
+    // The fleet's own identity when a real worker set is configured — model
+    // names, block size, routing group and each model's prior — over the
+    // catalog's latency curve, which stays the catalog's. Left at the
+    // defaults (a `local_model` of `"local"` nothing can ever route to)
+    // otherwise; see `local_fleet::from_env`.
+    let engine_config = match &local_setup {
+        Some(setup) => EngineConfig {
+            block_size: setup.block_size,
+            local_model: setup.local_model.clone(),
+            routing_group: setup.routing_group.clone(),
+            local_quality_prior: setup.local_quality_prior,
+            extra_local_models: setup.extra_local_models.clone(),
+            ..engine_config
+        },
+        None => engine_config,
+    };
+
+    // `local_setup`'s own executor when a real worker set is configured; the
+    // echo stub otherwise. `tokenizer` arrived already resolved the same way,
+    // because the classifier `main` composed is typed on it too. The fleet
+    // itself is moved out below for `.with_fleet(...)`.
+    let local_executor: Arc<dyn LocalExecutor> = match &local_setup {
+        Some(setup) => Arc::clone(&setup.executor),
+        None => Arc::new(EchoLocalExecutor::new("local answer")),
+    };
 
     // The router (`affinity`, `stage` or `learned`, as
     // `routing_composition::compose` chose from the booted plane) and, when a
@@ -1032,8 +1114,8 @@ async fn serve<S: SessionStore>(
     let (engine, recovery) = routing_composition::build_engine(
         EngineParts {
             store: Arc::clone(&store),
-            tokenizer: ByteTokenizer,
-            local_executor: Arc::new(EchoLocalExecutor::new("local answer")),
+            tokenizer,
+            local_executor,
             frontier_catalog: catalog,
             frontier_clients: Arc::clone(&frontier),
             config: engine_config.clone(),
@@ -1053,6 +1135,13 @@ async fn serve<S: SessionStore>(
     // decided, the same posture the catalog and the control plane take.
     if let Some(classifier) = classifier {
         engine = engine.with_classifier(classifier);
+    }
+
+    // The fleet every local quote above was promised against. Attached last
+    // among the engine's optional parts because it is the one that consumes
+    // `local_setup`.
+    if let Some(setup) = local_setup {
+        engine = engine.with_fleet(setup.fleet as Arc<dyn LocalFleet>);
     }
 
     // The validator is installed only where there is a judge to install it

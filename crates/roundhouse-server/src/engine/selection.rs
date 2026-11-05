@@ -128,6 +128,51 @@ impl<S: SessionStore, T: Tokenizer + Clone + 'static> Engine<S, T> {
             .err()
         })
     }
+
+    /// The same question as [`Self::local_quote_skip`], asked of one of
+    /// `extra_local_models` under its own identity and quality prior.
+    ///
+    /// Asked per extra model rather than once, because a policy may admit
+    /// one half of a cross-model pair and not the other — `min_quality`
+    /// sitting between the source's prior and the target's is the ordinary
+    /// case — and quoting a model the policy would then refuse is a residency
+    /// round trip whose answer is thrown away.
+    pub(super) fn extra_local_quote_skip(
+        &self,
+        declarations: &ClientDeclarations,
+        admission: &Admission,
+        model: &str,
+        quality_prior: f64,
+    ) -> Option<LocalQuoteSkip> {
+        local_quote_can_matter(
+            declarations.declares_tools(),
+            &admission.policy,
+            &Target::local_policy_identity(model),
+            quality_prior,
+        )
+        .err()
+    }
+
+    /// Every local model this engine quotes, primary first, each with the
+    /// quality prior it is priced at.
+    ///
+    /// The primary is `config.local_model`; the rest are
+    /// `config.extra_local_models` in configured order. Order is load-bearing
+    /// only in that the primary's skip reason is the turn's — see the quoting
+    /// loop in `plan`.
+    pub(super) fn local_models(&self) -> Vec<(String, f64)> {
+        std::iter::once((
+            self.config.local_model.clone(),
+            self.config.local_quality_prior,
+        ))
+        .chain(
+            self.config
+                .extra_local_models
+                .iter()
+                .map(|extra| (extra.model.clone(), extra.quality_prior)),
+        )
+        .collect()
+    }
 }
 
 /// Whether pricing the local fleet can still change this turn's route.
