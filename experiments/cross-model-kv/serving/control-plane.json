@@ -1,0 +1,37 @@
+{
+  "$comment": [
+    "Three projects over one local pair, so the handoff can be forced and measured:",
+    "  source-only  admits only local/<SOURCE>",
+    "  target-only  admits only local/<TARGET>",
+    "  pair         admits local/*; the router chooses per turn",
+    "run_pair.py replays one conversation under source-only, then re-sends the same",
+    "history under target-only. The target's first turn is the cold prefill a mapped",
+    "cache would skip. Model names below must match serve_pair.sh and env.sh.",
+    "Secrets are never in this file: run mint_keys.py to fill key_sha256 and write",
+    "keys.local.json (gitignored)."
+  ],
+  "projects": [
+    {
+      "id": "source-only",
+      "name": "Source model only",
+      "policy": { "min_quality": 0.0, "allow": ["local/Qwen/Qwen3-8B"] }
+    },
+    {
+      "id": "target-only",
+      "name": "Target model only",
+      "policy": { "min_quality": 0.0, "allow": ["local/Qwen/Qwen3-14B"] }
+    },
+    {
+      "id": "pair",
+      "name": "Either local model",
+      "policy": { "min_quality": 0.0, "allow": ["local/*"] }
+    }
+  ],
+  "users": [{ "id": "dev" }],
+  "keys": [
+    { "project": "source-only", "user": "dev", "key_sha256": "REPLACED-BY-mint_keys.py" },
+    { "project": "target-only", "user": "dev", "key_sha256": "REPLACED-BY-mint_keys.py" },
+    { "project": "pair", "user": "dev", "key_sha256": "REPLACED-BY-mint_keys.py" }
+  ],
+  "admin_keys": ["REPLACED-BY-mint_keys.py"]
+}

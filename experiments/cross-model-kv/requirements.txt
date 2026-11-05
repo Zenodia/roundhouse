@@ -1,0 +1,11 @@
+# Pinned below 5.x: the cache helpers in kvmap/cache.py cover the two 4.5x
+# DynamicCache layouts (key_cache / layers[i].keys); 5.x reshaped Cache again.
+transformers>=4.51,<5
+torch>=2.4
+accelerate>=0.30
+datasets>=2.19
+huggingface_hub>=0.23
+numpy
+pytest
+# Optional, for the paper's re-prefill setting in bench_latency.py (--attn flash_attention_2):
+# flash-attn

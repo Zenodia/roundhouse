@@ -70,6 +70,28 @@ cargo test -p roundhouse-server --lib local_fleet      # the worker-list parser
 cargo test -p roundhouse-server                        # the rest, incl. local_quote_skip.rs
 ```
 
+## Implementation
+
+`experiments/cross-model-kv/` — its README is the runbook, in order:
+
+- Part A, the paper: `collect_stats.py` (one pass over 500 FineWeb-Edu
+  sequences accumulating full source/target second moments with RoPE
+  stripped), `fit_mapper.py` (R² source selection, float64 ridge, λ=0.01),
+  `eval_transfer.py` (target / transfer / source over identical
+  continuations; retention and floor-normalized retention; the appendix-D
+  perplexity protocol), `bench_latency.py` (mapper vs re-prefill).
+- Part B, serving: `serving/serve_pair.sh` (two vLLM workers behind one
+  Dynamo frontend, split by `--gpu-memory-utilization`), `env.sh` (worker 1
+  and worker 2 variables), `run_pair.py` (forced handoff source→target
+  through Roundhouse; the target's cold turn is the measured tax).
+- `tests/test_kvmap.py`: CPU tests on toy shapes — RoPE round trip, moments
+  vs direct ridge, R² ranking, `map_cache` end to end.
+
+Default pair Qwen3-8B → Qwen3-14B (matched 8×128, fits one H100 with the
+23 GB of statistics). The formulas in `stats.py`/`mapper.py` were checked
+against a direct NumPy solve before commit; the torch code itself has not
+run on a GPU yet — the first smoke run is `collect_stats.py --num-seqs 20`.
+
 ## What the paper needs that this branch does not yet do
 
 1. **The mapper itself is engine-side.** Per-head ridge regression over the
