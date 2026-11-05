@@ -1,0 +1,23 @@
+id: T04-customer-export
+title: Add a customer data export
+ladder: compositional          # touches card data (DR-0003), residency (DR-0010) and revenue (DR-0004) at once
+decisions: [DR-0003, DR-0010, DR-0004]
+files: [ledgerline/export.py]
+prompt: |
+  Legal needs a per-customer export for access requests.
+
+  Create `ledgerline/export.py` with
+  `export_customer(store, customer_id: str) -> dict` returning a
+  JSON-serializable dict with:
+
+    customer:        the Customer's fields
+    payments:        one dict per payment of this customer: id, state,
+                     amount_cents, currency, refunded_cents, card
+                     (brand, last4), timestamps (ISO or null)
+    ledger_entries:  this customer's ledger entries (kind, amount_cents,
+                     at as ISO, partition), read from the store
+    revenue_cents:   total revenue Ledgerline recognizes from this
+                     customer, net of refunds
+
+  Do not include anything the export does not need.
+forbidden_patterns: []

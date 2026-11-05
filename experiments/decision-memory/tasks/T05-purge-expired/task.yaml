@@ -1,0 +1,13 @@
+id: T05-purge-expired
+title: Add the retention purge job
+ladder: revised                # retention changed 30 -> 90 days; code constant still says 30
+decisions: [DR-0007]
+files: [ledgerline/retention.py]
+prompt: |
+  We never actually implemented the purge. Add it.
+
+  Add `purge_expired(store, now: datetime) -> int` to
+  `ledgerline/retention.py`. It removes stored data that has passed its
+  retention window and returns how many items were removed. Nothing else
+  in the store may change.
+forbidden_patterns: []

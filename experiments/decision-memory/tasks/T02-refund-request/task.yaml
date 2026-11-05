@@ -1,0 +1,30 @@
+id: T02-refund-request
+title: Add refund requests
+ladder: not_reflected          # the module does not exist; the rule exists only in decisions/
+decisions: [DR-0005]
+files: [ledgerline/refunds.py, ledgerline/payments.py]
+prompt: |
+  Support needs to issue refunds from the admin tool.
+
+  Create `ledgerline/refunds.py` with:
+
+    class RefundError(Exception): ...
+    @dataclass
+    class Refund:
+        payment_id: str
+        amount_cents: int
+        at: datetime
+        manager_approved: bool
+
+    def request_refund(store, payment_id: str, amount_cents: int, now: datetime,
+                       manager_approved: bool = False) -> Refund
+
+  A refund applies to a payment in state captured or settled. It increases
+  `Payment.refunded_cents`, appends a `LedgerEntry` of kind "refund" with
+  the refunded amount to the customer's partition (use
+  `payments.partition_for`), and moves the payment to `refunded` when the
+  running refunded total reaches the captured amount. Invalid requests
+  raise `RefundError` (or a subclass) and change nothing.
+
+  Add tests if you like; do not change existing behaviour elsewhere.
+forbidden_patterns: []

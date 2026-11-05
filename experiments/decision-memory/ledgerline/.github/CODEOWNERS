@@ -1,0 +1,3 @@
+# Decision records are approved by the people who own the decisions, not
+# by engineering. A PR that touches decisions/ needs one of them.
+/decisions/   @Zenodia

@@ -139,3 +139,14 @@ The serving scripts from the earlier branch are in
 `agent-docs/cross-model-kv-transfer/`; `serve_model.sh` takes `MODEL=`,
 `TP=` and `GPUS=` so the second worker is a second invocation with a
 different model and KV-events port.
+
+## Follow-on: decision memory (branch `zcharpy/decision-memory`)
+
+`experiments/decision-memory/` reframes the use case around business
+decisions that outrun the code (the Ledgerline payments fixture): ten
+tasks, three conditions (no-memory / oracle / memory), policy tests that
+read the current decision records, a capture step from meeting notes, and
+the operate loop that retests affected tasks when a record is accepted.
+Its README is the runbook. The KV work above is its cost layer: the
+decision records sit in the shared prefix, and a changed record is the
+prefix divergence point.

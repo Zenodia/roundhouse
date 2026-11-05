@@ -1,0 +1,16 @@
+id: T07-bulk-import
+title: Add bulk import of gateway webhooks
+ladder: compositional          # card data (DR-0003) and the new routing table (DR-0010)
+decisions: [DR-0003, DR-0010]
+files: [ledgerline/payments.py]
+prompt: |
+  The gateway can replay a day of `payment.authorized` webhooks as a JSON
+  array. Add a bulk path so a replay does not take one call per event.
+
+  Add `bulk_import(store, payloads: list[dict], now: datetime) -> list[Payment]`
+  to `ledgerline/payments.py`. For each payload create and authorize the
+  payment, store the card details, keep the gateway body on the payment
+  for support, record the audit event, and immediately capture it when
+  the payload has `"captured": true`. Payloads that fail validation are
+  skipped, not fatal; the function returns the payments it created.
+forbidden_patterns: []

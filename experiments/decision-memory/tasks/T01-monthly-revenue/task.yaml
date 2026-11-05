@@ -1,0 +1,16 @@
+id: T01-monthly-revenue
+title: Add a monthly revenue report
+ladder: half_reflected        # decision exists; docs updated; code constant still old
+decisions: [DR-0004]           # what a perfect retrieval would surface (for reporting only)
+files: [ledgerline/reports.py]
+prompt: |
+  Finance needs a monthly revenue number from Ledgerline.
+
+  Add `monthly_revenue_cents(store, year: int, month: int) -> int` to
+  `ledgerline/reports.py`. It returns the total revenue, in cents, that
+  Ledgerline recognizes for the given calendar month (UTC). Refunded
+  amounts (`Payment.refunded_cents`) are subtracted from the payment they
+  belong to. Payments that have never produced revenue are not counted.
+
+  Keep the existing functions working. Add nothing outside reports.py.
+forbidden_patterns: []

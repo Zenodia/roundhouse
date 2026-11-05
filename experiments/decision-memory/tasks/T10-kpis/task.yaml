@@ -1,0 +1,16 @@
+id: T10-kpis
+title: Add the finance KPI endpoint payload
+ladder: compositional          # revenue (DR-0004) and retention (DR-0007) in one function
+decisions: [DR-0004, DR-0007]
+files: [ledgerline/reports.py]
+prompt: |
+  Add `kpis(store, now: datetime) -> dict` to `ledgerline/reports.py`
+  for the finance dashboard:
+
+    revenue_mtd_cents:       revenue recognized month-to-date (now's month)
+    revenue_prev_month_cents: revenue recognized in the previous month
+    open_authorizations:     payments in state authorized
+    raw_events_retained:     raw events that are still within their
+                             retention window at `now`
+    aggregates_total:        number of aggregates
+forbidden_patterns: []

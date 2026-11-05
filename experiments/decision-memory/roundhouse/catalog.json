@@ -1,0 +1,44 @@
+{
+  "$comment": [
+    "Catalog for the decision-memory runs through Roundhouse. Two tiers:",
+    "  frontier: NVIDIA's inference API (https://inference-api.nvidia.com/v1). Roundhouse has no",
+    "            chat-completions client, so Anthropic models go through the Messages dialect, as",
+    "            the cache-aware-routing branch did. The model id below is Claude Sonnet 5 as the",
+    "            catalog names it (verify with: curl -H 'Authorization: Bearer $INFERENCE_API_KEY'",
+    "            https://inference-api.nvidia.com/v1/models). Opus 5.5 (azure/anthropic/claude-opus-5-5)",
+    "            is the premium tier; use it only for a final headline run.",
+    "  local:    Qwen3-14B and Qwen3-8B registered as local workers via env.sh (Dynamo)",
+    "Prices are placeholders; local_quality numbers are placeholders on the 0..1 scale."
+  ],
+  "providers": {
+    "nvidia": {
+      "base_url": "https://inference-api.nvidia.com/v1",
+      "routes": { "messages": "/messages" },
+      "auth": { "env": "INFERENCE_API_KEY", "style": "bearer" }
+    }
+  },
+  "models": [
+    {
+      "provider": "nvidia",
+      "model": "aws/anthropic/bedrock-claude-sonnet-5",
+      "wire_protocol": "anthropic_messages",
+      "cache_model": { "kind": "deterministic", "ttl_ms": 300000 },
+      "pricing": {
+        "input_per_mtok_usd": 3.0,
+        "cached_input_per_mtok_usd": 0.3,
+        "cache_write_per_mtok_usd": 3.75,
+        "output_per_mtok_usd": 15.0
+      },
+      "quality_prior": 0.90,
+      "base_ttft_ms": 350.0,
+      "ttft_ms_per_uncached_token": 0.0015
+    }
+  ],
+  "local_quality": { "Qwen/Qwen3-14B": 0.72, "Qwen/Qwen3-8B": 0.66 },
+  "correlaries": [],
+  "default_local_quality": 0.5,
+  "capability_band": 0.10,
+  "local_base_ttft_ms": 60.0,
+  "local_ttft_ms_per_prefill_token": 0.093,
+  "fleet_quote_deadline_ms": 500
+}

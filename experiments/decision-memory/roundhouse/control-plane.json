@@ -1,0 +1,28 @@
+{
+  "$comment": [
+    "Two projects, one per tier, so the same runner command differs only in the key:",
+    "  frontier  admits nvidia/* only",
+    "  local     admits local/Qwen/Qwen3-14B only",
+    "Run mint_keys.py here to fill key_sha256 and write keys.local.json (gitignored).",
+    "INFERENCE_API_KEY must be exported for the frontier project's credential."
+  ],
+  "projects": [
+    {
+      "id": "frontier",
+      "name": "Frontier tier",
+      "policy": { "min_quality": 0.0, "allow": ["nvidia/*"] },
+      "credentials": { "mode": "project_only", "providers": { "nvidia": { "env_var": "INFERENCE_API_KEY", "kind": "api_key" } } }
+    },
+    {
+      "id": "local",
+      "name": "Local tier",
+      "policy": { "min_quality": 0.0, "allow": ["local/Qwen/Qwen3-14B"] }
+    }
+  ],
+  "users": [{ "id": "runner" }],
+  "keys": [
+    { "project": "frontier", "user": "runner", "key_sha256": "REPLACED-BY-mint_keys.py" },
+    { "project": "local", "user": "runner", "key_sha256": "REPLACED-BY-mint_keys.py" }
+  ],
+  "admin_keys": ["REPLACED-BY-mint_keys.py"]
+}

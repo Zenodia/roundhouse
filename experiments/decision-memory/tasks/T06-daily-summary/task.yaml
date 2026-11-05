@@ -1,0 +1,20 @@
+id: T06-daily-summary
+title: Add a daily operations summary
+ladder: half_reflected
+decisions: [DR-0004]
+files: [ledgerline/reports.py]
+prompt: |
+  Ops wants a one-call daily summary for the morning dashboard.
+
+  Add `daily_summary(store, day: date) -> dict` to
+  `ledgerline/reports.py` returning:
+
+    day:              ISO date string
+    captured_count:   payments captured that day
+    settled_count:    payments settled that day
+    refunded_count:   payments in state refunded whose last ledger entry
+                      is on that day (0 if none)
+    revenue_cents:    revenue Ledgerline recognizes for that day
+
+  `day` is a `datetime.date` in UTC.
+forbidden_patterns: []

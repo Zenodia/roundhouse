@@ -1,0 +1,13 @@
+id: T09-partition-routing
+title: Make partition routing explicit and testable
+ladder: revised                # UK moved out of eu; EU_REGIONS still lists it
+decisions: [DR-0010]
+files: [ledgerline/payments.py, ledgerline/storage.py]
+prompt: |
+  `partition_for` is the only place residency is decided and it is
+  getting hard to review. Add `route_partition(region: str) -> str` to
+  `ledgerline/payments.py` that returns the partition name for a
+  storefront region code, make `partition_for` delegate to it, and make
+  sure `Store` starts with every partition `route_partition` can return
+  (see `storage.PARTITIONS`). Existing tests must still pass.
+forbidden_patterns: []

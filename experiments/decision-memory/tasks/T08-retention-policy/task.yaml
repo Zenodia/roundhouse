@@ -1,0 +1,12 @@
+id: T08-retention-policy
+title: Expose the retention policy
+ladder: revised
+decisions: [DR-0007]
+files: [ledgerline/retention.py]
+prompt: |
+  The data-governance dashboard polls each service for its retention
+  policy. Add `retention_policy() -> dict` to `ledgerline/retention.py`
+  returning `{"raw_event_days": int, "aggregate_days": int | None}` where
+  `None` means kept indefinitely. The values must be what Ledgerline
+  actually enforces.
+forbidden_patterns: []
