@@ -2311,11 +2311,12 @@ impl<S: SessionStore, T: Tokenizer + Clone + 'static> Engine<S, T> {
         // paired with the quality prior it is priced at, because the two
         // models of a cross-model pair are by construction different sizes
         // and the router must see that difference or it would pick between
-        // them by load alone. The primary's skip reason is the turn's skip
-        // reason (the tool arm and the policy arm apply to every local model
-        // alike); an extra model whose own identity the policy keeps out is
-        // simply not quoted, which is what a policy that names no such
-        // target asked for.
+        // them by load alone. The turn is skipped outright only when no local
+        // model's quote can matter, and then with the primary's reason (the
+        // tool arm applies to every local model alike). Past that gate each
+        // model is asked under its own identity: one the policy keeps out,
+        // primary or not, is simply not quoted, which is what a policy that
+        // names no such target asked for.
         let (local_quotes, local_quote_skipped): (
             Vec<(LocalQuote, f64)>,
             Option<LocalQuoteSkip>,
@@ -2331,15 +2332,9 @@ impl<S: SessionStore, T: Tokenizer + Clone + 'static> Engine<S, T> {
                 let mut quotes = Vec::with_capacity(1 + self.config.extra_local_models.len());
                 let mut first_skip = None;
                 for (model, quality_prior) in self.local_models() {
-                    if model != self.config.local_model
-                        && self
-                            .extra_local_quote_skip(
-                                declarations,
-                                admission,
-                                &model,
-                                quality_prior,
-                            )
-                            .is_some()
+                    if self
+                        .local_model_quote_skip(declarations, admission, &model, quality_prior)
+                        .is_some()
                     {
                         continue;
                     }

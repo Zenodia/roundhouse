@@ -35,15 +35,17 @@ The scripts refuse a pair whose KV head count or head_dim differ.
 
 ### A0. Environment
 
-On the GPU machine:
+Needs one NVIDIA GPU (80 GB for the default pair) and Python 3.12.
 
 ```bash
 cd roundhouse/experiments/cross-model-kv
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+# uv works where python3-venv is not installed (stock Ubuntu without sudo):
+uv venv --python 3.12 .venv && source .venv/bin/activate
+uv pip install -r requirements.txt
+# or: python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
 # Optional, for the paper's flash_attention_2 re-prefill timing: pip install flash-attn --no-build-isolation
 huggingface-cli login   # only if your Hub access needs it; Qwen3 is public
-python -m pytest tests -q   # CPU-only math tests; also runs on a laptop
+python -m pytest tests -q   # CPU-only math tests, ~2 s
 ```
 
 Pre-download the weights so later steps do not stall on the network:
@@ -121,7 +123,8 @@ transfer / target`, and floor-normalized retention `(transfer − chance) /
 mode and the transfer/target ratio.
 
 Results append to `runs/qwen3-8b-14b/results.jsonl`. With `--limit 500`
-HellaSwag takes roughly 10–15 minutes on an H100 (3 modes x 4 choices x 500).
+HellaSwag took 5.5 minutes on an H100 (3 modes x 4 choices x 500), ARC-Challenge
+4.9 minutes, WikiText (60 chunks) under 30 seconds.
 Drop `--limit` for the full validation split when you want paper-grade
 numbers.
 
@@ -153,59 +156,223 @@ Fit several k (A2), run A3 at each, and take the k with the best mean
 `acc_norm` over the log-likelihood tasks, breaking ties toward larger k —
 the paper's rule. That mapper is the one Part B's successor would ship.
 
+## What it took to run this end to end
+
+Part A needed three small changes to run, none to the method:
+
+- **Environment.** `python3 -m venv` failed (no `python3-venv`, no sudo), so
+  A0 now uses `uv venv`. `pip install -r requirements.txt` resolved to
+  torch 2.15 and transformers 4.57.6, inside the `<5` pin.
+- **One test fixed.** `test_moments_memory_estimate_is_the_float32_footprint`
+  compared GiB against the README's decimal GB: the statistics are 21.4 GiB,
+  which is the README's "about 23 GB". The code was right; the test now
+  divides by `1e9`. The other six CPU tests, including the `DynamicCache`
+  ones, passed unchanged, so the transformers-version risk did not bite.
+- **`.venv/` added to `.gitignore`.**
+
+Steps that needed nothing: FineWeb-Edu streams from the Hub without a login,
+both models load together in bf16 (the statistics ran at 21.4 GiB beside
+44 GB of weights), and the 20-sequence smoke run (`--num-seqs 20`, under a
+minute) exercised the whole path before the full one.
+
+Disk: `stats.pt` is 21.4 GiB, so a smoke run plus a full run needs ~45 GB of
+`runs/`; delete the smoke directory when done. The mappers are 0.3 / 1.25 /
+2.5 / 5 GiB for k = 1 / 4 / 8 / 16.
+
+Part B needed more, because it had never run against real workers. Four
+defects, each fixed:
+
+- **Scripts were not executable.** `serve_pair.sh`, `mint_keys.py` and
+  `run_pair.py` were committed as mode 644, so `./serve_pair.sh` failed with
+  exit 126. They are 755 now.
+- **`serve_pair.sh`: two models on one endpoint.** Dynamo refuses a second
+  model on an endpoint that already serves one (`Cannot register model ...
+  a different model ... is already registered there`), so the second worker
+  crashed and the cleanup trap took the first down with it. Each worker now
+  gets its own endpoint, `dyn://dynamo.target.generate` and
+  `dyn://dynamo.source.generate`; the shared namespace keeps both visible to
+  the one frontend.
+- **Roundhouse engine: a policy that admits only the second local model was
+  refused.** The `target-only` project returned `no target this key may use
+  was admissible` for every turn. The engine decided whether to quote the
+  fleet from the *primary* model's identity alone, so a policy excluding the
+  primary skipped every local quote, including the one for the model the
+  policy allowed. The skip is now decided across the whole local fleet, and
+  each model is checked under its own identity (`engine/selection.rs`,
+  `engine.rs`). The guard is
+  `crates/roundhouse-server/tests/extra_local_model_policy.rs`; it failed with
+  `Routing(PolicyRefused)` before the fix and its control (primary admitted)
+  passed both before and after.
+- **`run_pair.py` could not be run twice.** It used a fixed
+  `prompt_cache_key`, so a second run against a live Roundhouse deduplicated
+  onto the stored responses: no GPU work, `served_by` `?`, TTFT ~30 ms. The
+  key now carries a per-run id (`RUN_ID` overrides it).
+
+Also added: `probe_ttft.py`, because the TTFT column of `run_pair.py` is not a
+TTFT (see B3). `mint_keys.py` writes hashes into the tracked
+`control-plane.json`, so that file shows as modified after B1.
+
+## Part A results: Qwen3-8B → Qwen3-14B, k = 8
+
+Run on one H100 80 GB, bf16, eager attention, transformers 4.57.6, torch
+2.15. Calibration: 500 FineWeb-Edu sequences x 1,024 tokens, stride 4, so
+128,000 token observations (A1 took 143 s; A2 took 48 s for four k values).
+Benchmarks use the first 500 examples (WikiText: 60 chunks), so one standard
+error is about 2 points on the accuracies.
+
+| Task | target (ceiling) | **transfer** | source (floor) | retention | floor-normalized |
+|---|---|---|---|---|---|
+| HellaSwag `acc_norm` | 0.678 | **0.634** | 0.644 | 93.5% | 89.7% |
+| ARC-Challenge `acc_norm` | 0.588 | **0.526** | 0.558 | 89.5% | 81.7% |
+| WikiText perplexity (lower is better) | 7.19 | **8.38** | 8.11 | ratio 1.16 | |
+
+Fit sanity check: the best single source layer explains R² 0.62 of a target
+layer's KV on average (min 0.53, max 0.83), and the chosen source layers
+follow depth (target layer 20 takes source layers 15–22).
+
+Latency (mapper vs. target re-prefill, body only, eager, bf16):
+
+| Tokens | mapper | re-prefill | speedup |
+|---|---|---|---|
+| 64 | 8.7 ms | 29.8 ms | 3.4x |
+| 256 | 8.5 ms | 29.2 ms | 3.4x |
+| 1,024 | 8.3 ms | 58.6 ms | 7.0x |
+| 4,096 | 19.6 ms | 233.5 ms | 11.9x |
+| 8,192 | 37.7 ms | 484.7 ms | 12.9x |
+
+**What these say, plainly.** Retention against the target clears the
+README's Tier-1 bar (>90% on HellaSwag, perplexity ratio under 1.3), and the
+mapper is 3–13x faster than re-prefill. But the mapped cache does **not**
+beat the source model alone on any task: HellaSwag is within noise (0.634 vs
+0.644), ARC is 3 points below, and WikiText perplexity is higher than the
+source's. This pair's source is already close to its target, so "retention"
+is a weak signal here; compare against the `source` column. On this evidence,
+moving a session from the 8B to the 14B with a mapped cache buys speed
+against re-prefill but not quality over staying on the 8B. Only k = 8 was
+evaluated; the k = 1, 4, 16 mappers are fitted but not scored (A5 is open).
+Swept k and the full validation splits are the next step before relying on
+these numbers.
+
 ## Part B: serving both models behind Roundhouse
 
-This measures the handoff cost in the real stack. It needs the Roundhouse
-binary from this branch (the one that registers N local workers) and a
-Dynamo + vLLM environment.
+This measures the handoff cost in the real stack. It needs a Dynamo + vLLM
+environment, the Roundhouse release binary, and the weights from Part A. Part
+A does not need any of it.
 
-### B0. Environment
+### B0. Environment, from scratch
 
-1. **Dynamo at the pinned rev.** Follow
-   `agent-docs/cross-model-kv-transfer/DYNAMO_LOCAL_SERVING.md` (a from-source
-   install validated on a 1x H100 box): clone `ai-dynamo/dynamo` at
-   `ac7b7513790ef1d619b46f805aea03c9f21200ba`, build, `uv pip install -e
-   '.[vllm]'`, and bring up etcd and nats with
-   `docker compose -f dev/docker-compose.yml up -d`.
-2. **Roundhouse binary**, built on the GPU machine or copied there:
-   `cargo build -p roundhouse-server --bin roundhouse --release`.
-3. Weights pulled (A0 did this if you share the HF cache).
+Needs: one NVIDIA GPU with 80 GB, Docker (the user must be able to run
+`docker`), `sudo` for the system packages, and about 100 GB of free disk
+(weights, statistics, and Dynamo's Python environment).
 
-### B1. Serve the pair
+**1. System packages and Rust.**
 
 ```bash
+sudo apt install -y build-essential libhwloc-dev libudev-dev pkg-config libclang-dev \
+    protobuf-compiler python3-dev cmake libzmq3-dev
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh && source "$HOME/.cargo/env"
+```
+
+The first seven are Dynamo's build dependencies; `libzmq3-dev` is what the
+Roundhouse build needs (through `dynamo-kv-router`). You also need `uv`
+(https://docs.astral.sh/uv/).
+
+**2. Dynamo at the pinned revision.** Roundhouse's `Cargo.toml` pins
+`ai-dynamo/dynamo` at `ac7b7513790ef1d619b46f805aea03c9f21200ba`; use the same
+one for the workers, so the KV-event wire and block hashing match.
+
+```bash
+git clone https://github.com/ai-dynamo/dynamo.git ~/dynamo
+cd ~/dynamo && git checkout ac7b7513790ef1d619b46f805aea03c9f21200ba
+uv venv .venv && source .venv/bin/activate
+uv pip install pip 'maturin[patchelf]'
+(cd lib/bindings/python && maturin develop --uv)   # compiles the Rust bindings, ~4 min
+uv pip install -e lib/gpu_memory_service
+uv pip install -e '.[vllm]'                        # torch 2.11, vllm 0.26; several GB
+python -c "import dynamo.vllm" && echo ok
+```
+
+If the revision in `Cargo.toml` has moved since this was written, re-read that
+revision's own build docs before reusing these steps.
+
+On CUDA 13, vLLM's FlashInfer sampler can fail to JIT-compile against
+version-skewed headers and abort the worker at startup. `serve_pair.sh` sets
+`VLLM_USE_FLASHINFER_SAMPLER=0` by default for this; leave it unless you have
+fixed the toolchain.
+
+**3. etcd and nats**, which Dynamo uses for discovery and events:
+
+```bash
+cd ~/dynamo && docker compose -f dev/docker-compose.yml up -d
+docker ps    # dev-etcd-server-1 and dev-nats-server-1 should be Up
+```
+
+**4. The Roundhouse binary**, from the repository root:
+
+```bash
+cargo build -p roundhouse-server --bin roundhouse --release
+```
+
+**5. Weights and the experiment environment.** A0 above created the
+experiment's `.venv` and pulled both models into the Hugging Face cache; Part
+B reuses both. `env.sh` needs `huggingface_hub` (it finds the tokenizer in the
+cache), so run it from that `.venv`. `serve_pair.sh` must run in the **Dynamo**
+venv from step 2. `mint_keys.py`, `run_pair.py` and `probe_ttft.py` use only
+the standard library and run in either.
+
+### B1. Mint keys and start Roundhouse (first)
+
+Start Roundhouse **before** the workers. It learns what each worker has cached
+from the KV events the worker publishes and cannot replay events it missed
+(the log says `Gap detected: expected seq 0, got 64 ... batches lost`). A
+Roundhouse that starts late, or is restarted alone, believes the worker holds
+nothing, and the `cached` column then reads 0% for a worker that is in fact
+warm. It does not need Dynamo at boot. Observed: a Roundhouse restart after
+dozens of requests lost the 8B's cache state, and every source-only turn read
+0%; two smoke requests before it started did no harm. After any Roundhouse
+restart, restart the pair too.
+
+```bash
+cd roundhouse/experiments/cross-model-kv/serving
+source ../.venv/bin/activate
+python mint_keys.py     # fills control-plane.json hashes, writes keys.local.json (gitignored)
+source env.sh           # ROUNDHOUSE_LOCAL_* for worker 1, ROUNDHOUSE_LOCAL_WORKER_2_* for worker 2
+../../../target/release/roundhouse
+```
+
+The boot log should print two `local fleet: real worker registered` lines, one
+per model. If it refuses to start, the message names the variable; the usual
+one is a missing `ROUNDHOUSE_LOCAL_WORKER_2_KV_EVENTS_ENDPOINT`.
+`mint_keys.py` writes hashes into the tracked `control-plane.json`; the secrets
+go to `keys.local.json`.
+
+`control-plane.json` and `env.sh` name the default pair. For another pair, edit
+the three `allow` lists in `control-plane.json` and the `local_quality` entries
+in `catalog.json` to the served model names, and export `SOURCE`/`TARGET`
+before `source env.sh`.
+
+### B2. Serve the pair
+
+In a second terminal, in the Dynamo venv:
+
+```bash
+source ~/dynamo/.venv/bin/activate
 cd roundhouse/experiments/cross-model-kv/serving
 ./serve_pair.sh                       # Qwen3-8B (0.30 of the card) + Qwen3-14B (0.55)
 # or: SOURCE=Qwen/Qwen3-4B TARGET=Qwen/Qwen3-8B SOURCE_MEM=0.2 TARGET_MEM=0.35 ./serve_pair.sh
 ```
 
-One Dynamo frontend on `:8000` serves both models; each vLLM worker
-publishes KV events on its own ZMQ port (`20080` source, `20081` target).
-The target starts first and the source after `STAGGER_S` (90 s) so the two
-`--gpu-memory-utilization` fractions do not race. Smoke-test both:
+One Dynamo frontend on `:8000` serves both models; each vLLM worker publishes
+KV events on its own ZMQ port (`20080` source, `20081` target) and registers on
+its own endpoint (Dynamo refuses two models on one). The target starts first
+and the source after `STAGGER_S` (90 s) so the two `--gpu-memory-utilization`
+fractions do not race. Wait until both models are listed, then smoke-test:
 
 ```bash
 curl -s localhost:8000/v1/models | python3 -m json.tool
 curl -s localhost:8000/v1/chat/completions -H 'content-type: application/json' \
   -d '{"model":"Qwen/Qwen3-14B","messages":[{"role":"user","content":"hi"}],"max_tokens":8}'
 ```
-
-### B2. Mint keys and start Roundhouse
-
-```bash
-python mint_keys.py                   # fills control-plane.json hashes, writes keys.local.json (gitignored)
-source env.sh                         # ROUNDHOUSE_LOCAL_* for worker 1 and ROUNDHOUSE_LOCAL_WORKER_2_* for worker 2
-../../../target/release/roundhouse
-```
-
-The boot log should print two `local fleet: real worker registered` lines,
-one per model. If it refuses to start, the message names the variable; the
-usual one is a missing `ROUNDHOUSE_LOCAL_WORKER_2_KV_EVENTS_ENDPOINT`.
-
-`control-plane.json` and `env.sh` name the default pair. For another pair,
-edit the three `allow` lists in `control-plane.json` and the
-`local_quality` entries in `catalog.json` to the served model names, and
-export `SOURCE`/`TARGET` before `source env.sh`.
 
 ### B3. Run the handoff measurement
 
@@ -226,6 +393,66 @@ phases:
 3. `pair`, under `local/*`: the router's own choice per turn, unforced.
 
 Raw rows and the `/v1/metrics` snapshot go to `serving/runs/`.
+
+Three things about reading the table:
+
+- **`ttft_ms` is not a time to first token.** Roundhouse returns a local
+  turn's text after the worker has finished it, so the column equals total
+  turn time (it was 811 ms for a 49-token answer and ~3.8 s for 256 tokens,
+  with the same prompt size). Use `probe_ttft.py` for TTFT (below).
+- **`cached` is Roundhouse's view of the worker's KV**, built from its KV
+  events, not a count the worker reports. See the ordering note in B1.
+- **The handoff is only cold if the target has not seen the prefix.** The
+  corpus prefix stays in the target's cache after a run, so a second run
+  without restarting the pair shows turn 5 partly warm (1,472 of 2,599 cached
+  in one such run). Restart the pair between runs.
+
+```bash
+python probe_ttft.py     # true cold and warm TTFT per model, straight from Dynamo
+```
+
+It streams with `max_tokens=1` at 512 to 6K tokens, each prompt once cold (a
+random head defeats the prefix cache) and once warm, median of 3.
+
+## Part B results: Qwen3-8B + Qwen3-14B behind Roundhouse
+
+One H100, vLLM 0.26, Dynamo `ac7b751`, `--enforce-eager`, block size 64,
+`max_model_len` 8192, `HANDOFF_AT=4`; Roundhouse started before the pair.
+
+Forced handoff, same conversation, `run_pair.py`:
+
+| Turn | Phase | Input tokens | Cached | Worker |
+|---|---|---|---|---|
+| 1 | source-only | 1,487 | 0 (0%) | 8B |
+| 2 to 4 | source-only | 1,767 to 2,328 | 83 to 88% | 8B |
+| **5** | **target-only (handoff)** | **2,599** | **0 (0%)** | **14B** |
+| 6 to 8 | target-only | 2,880 to 3,439 | 89 to 91% | 14B |
+
+The handoff turn re-prefills all 2,599 tokens on the target, though the source
+held the shared prefix. That is the work a mapped cache would skip. Under the
+unforced `pair` key the router stayed on the 8B for all eight turns, so it did
+not hand off on its own with these catalog numbers (`local_quality` 0.66 vs
+0.72). Why was not investigated; the 8B held the cached prefix, which is the
+likely reason, but that is a guess. (In an earlier run, after the pair had
+served the prefix on the 14B, the router chose the 14B for all eight turns.)
+
+Prefill cost from Dynamo (`probe_ttft.py`, TTFT in ms, median of 3):
+
+| Prefix tokens | 8B cold | 8B warm | 14B cold | 14B warm |
+|---|---|---|---|---|
+| ~530 | 49 | 24 | 61 | 27 |
+| ~1,024 | 82 | 27 | 104 | 31 |
+| ~2,050 | 157 | 27 | 195 | 29 |
+| ~4,060 | 302 | 30 | 381 | 31 |
+| ~6,110 | 454 | 31 | 577 | 32 |
+
+Cold TTFT grows about linearly with the prefix (14B: ~93 ms per 1,000 tokens);
+a warm hit stays near 30 ms. So the cold prefill a handoff pays on the 14B is
+about 195 ms at 2K tokens and 381 ms at 4K, against a mapper that Part A timed
+at 8 to 20 ms for 1K to 4K tokens. Do not divide one by the other: the vLLM
+figures include the frontend and scheduler, the mapper figure is the mapper
+alone, and shipping the mapped cache into the target (the connector, below) is
+not in it.
 
 ## Other pairs
 
@@ -271,5 +498,5 @@ fit_mapper.py     A2
 eval_transfer.py  A3
 bench_latency.py  A4
 tests/            CPU tests over toy shapes
-serving/          B: serve_pair.sh env.sh catalog.json control-plane.json mint_keys.py run_pair.py corpus.md turns.jsonl
+serving/          B: serve_pair.sh env.sh catalog.json control-plane.json mint_keys.py run_pair.py probe_ttft.py corpus.md turns.jsonl
 ```

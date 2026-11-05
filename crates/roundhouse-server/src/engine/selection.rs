@@ -113,31 +113,39 @@ impl<S: SessionStore, T: Tokenizer + Clone + 'static> Engine<S, T> {
     /// on exactly those turns before a quote is ever asked for, and a
     /// selector that is down was failing turns that were always going to a
     /// hosted model.
+    ///
+    /// Asked of the whole local fleet, not of the primary alone: the tool arm
+    /// holds for every model alike, but the policy arm is per identity, and a
+    /// policy that admits only a later model of a cross-model pair must not be
+    /// refused because it excludes the primary. `None` when any local model's
+    /// quote can matter; otherwise the primary's reason, which is the turn's.
     pub(super) fn local_quote_skip(
         &self,
         declarations: &ClientDeclarations,
         admission: &Admission,
     ) -> Option<LocalQuoteSkip> {
-        self.fleet.as_ref().and_then(|_| {
-            local_quote_can_matter(
-                declarations.declares_tools(),
-                &admission.policy,
-                &Target::local_policy_identity(&self.config.local_model),
-                self.config.local_quality_prior,
-            )
-            .err()
-        })
+        self.fleet.as_ref()?;
+        let mut turn_reason = None;
+        for (model, quality_prior) in self.local_models() {
+            match self.local_model_quote_skip(declarations, admission, &model, quality_prior) {
+                None => return None,
+                Some(reason) => {
+                    turn_reason.get_or_insert(reason);
+                }
+            }
+        }
+        turn_reason
     }
 
-    /// The same question as [`Self::local_quote_skip`], asked of one of
-    /// `extra_local_models` under its own identity and quality prior.
+    /// The same question as [`Self::local_quote_skip`], asked of one local
+    /// model under its own identity and quality prior.
     ///
-    /// Asked per extra model rather than once, because a policy may admit
+    /// Asked per model rather than once, because a policy may admit
     /// one half of a cross-model pair and not the other — `min_quality`
     /// sitting between the source's prior and the target's is the ordinary
     /// case — and quoting a model the policy would then refuse is a residency
     /// round trip whose answer is thrown away.
-    pub(super) fn extra_local_quote_skip(
+    pub(super) fn local_model_quote_skip(
         &self,
         declarations: &ClientDeclarations,
         admission: &Admission,

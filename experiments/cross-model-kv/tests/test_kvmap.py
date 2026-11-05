@@ -182,8 +182,8 @@ def test_map_cache_reproduces_target_kv():
 
 def test_moments_memory_estimate_is_the_float32_footprint():
     src, tgt = KvShape(36, 8, 128), KvShape(40, 8, 128)
-    gib = CalibrationStats.bytes_needed(src, tgt) / 2**30
-    assert 22 < gib < 24  # the README's "about 23 GB" for Qwen3-8B -> 14B
+    gb = CalibrationStats.bytes_needed(src, tgt) / 1e9
+    assert 22 < gb < 24  # the README's "about 23 GB" (decimal) for Qwen3-8B -> 14B
 
 
 if __name__ == "__main__":

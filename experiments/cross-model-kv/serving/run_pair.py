@@ -46,6 +46,10 @@ HERE = Path(__file__).resolve().parent
 BASE_URL = os.environ.get("ROUNDHOUSE_URL", "http://127.0.0.1:8080").rstrip("/")
 TURN_KEY_HEADER = "x-roundhouse-key"
 HANDOFF_AT = int(os.environ.get("HANDOFF_AT", "4"))
+# Roundhouse deduplicates a turn it has already answered for the same session, so a
+# fixed key makes a second run against a live process replay stored responses
+# (no GPU work, TTFT ~30 ms, served_by "?"). A fresh key per run opens fresh sessions.
+RUN_ID = os.environ.get("RUN_ID") or str(int(time.time()))
 
 SYSTEM_PREAMBLE = (
     "You are a precise engineering assistant answering questions about the "
@@ -171,9 +175,9 @@ def main() -> None:
     print("\n=== forced handoff: source-only -> target-only ===")
     header()
     conversation: list[dict] = []
-    ok = run_turns("source-only", secrets_map["source-only/dev"], admin, instructions, conversation, turns[:n], 1, "handoff-run", rows)
+    ok = run_turns("source-only", secrets_map["source-only/dev"], admin, instructions, conversation, turns[:n], 1, f"handoff-run-{RUN_ID}", rows)
     if ok:
-        run_turns("target-only", secrets_map["target-only/dev"], admin, instructions, conversation, turns[n : 2 * n], n + 1, "handoff-run", rows)
+        run_turns("target-only", secrets_map["target-only/dev"], admin, instructions, conversation, turns[n : 2 * n], n + 1, f"handoff-run-{RUN_ID}", rows)
     handoff = next((r for r in rows if r["turn"] == n + 1), None)
     if handoff:
         print(
@@ -185,7 +189,7 @@ def main() -> None:
     # --- unforced: the router picks under local/* -------------------------
     print("\n=== unforced: pair (local/*) ===")
     header()
-    run_turns("pair", secrets_map["pair/dev"], admin, instructions, [], turns[: 2 * n], 1, "pair-run", rows)
+    run_turns("pair", secrets_map["pair/dev"], admin, instructions, [], turns[: 2 * n], 1, f"pair-run-{RUN_ID}", rows)
 
     out = HERE / "runs"
     out.mkdir(exist_ok=True)

@@ -14,24 +14,57 @@
     {
       "id": "source-only",
       "name": "Source model only",
-      "policy": { "min_quality": 0.0, "allow": ["local/Qwen/Qwen3-8B"] }
+      "policy": {
+        "min_quality": 0.0,
+        "allow": [
+          "local/Qwen/Qwen3-8B"
+        ]
+      }
     },
     {
       "id": "target-only",
       "name": "Target model only",
-      "policy": { "min_quality": 0.0, "allow": ["local/Qwen/Qwen3-14B"] }
+      "policy": {
+        "min_quality": 0.0,
+        "allow": [
+          "local/Qwen/Qwen3-14B"
+        ]
+      }
     },
     {
       "id": "pair",
       "name": "Either local model",
-      "policy": { "min_quality": 0.0, "allow": ["local/*"] }
+      "policy": {
+        "min_quality": 0.0,
+        "allow": [
+          "local/*"
+        ]
+      }
     }
   ],
-  "users": [{ "id": "dev" }],
-  "keys": [
-    { "project": "source-only", "user": "dev", "key_sha256": "REPLACED-BY-mint_keys.py" },
-    { "project": "target-only", "user": "dev", "key_sha256": "REPLACED-BY-mint_keys.py" },
-    { "project": "pair", "user": "dev", "key_sha256": "REPLACED-BY-mint_keys.py" }
+  "users": [
+    {
+      "id": "dev"
+    }
   ],
-  "admin_keys": ["REPLACED-BY-mint_keys.py"]
+  "keys": [
+    {
+      "project": "source-only",
+      "user": "dev",
+      "key_sha256": "fc8dc17483f4d76614ac1ac2401580a315274d32df53e7f01d9a18e77cf245fb"
+    },
+    {
+      "project": "target-only",
+      "user": "dev",
+      "key_sha256": "fbe53f3322fcb6d26e2f63716cc3750f04e165fce8fd7e3c774aa0ea39605b0b"
+    },
+    {
+      "project": "pair",
+      "user": "dev",
+      "key_sha256": "dea0d8c4c59c5520a293a6a7d422e3c2a9ad05afc9aea8570c4a0ce59c454a5c"
+    }
+  ],
+  "admin_keys": [
+    "16179639d932b9593ae8b1d4b8a1e7b45c43d25377c11cc50373121c7fcef96e"
+  ]
 }

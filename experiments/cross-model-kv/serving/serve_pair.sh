@@ -6,11 +6,11 @@
 # worker publishing its own KV-cache events, so Roundhouse can register both
 # as local workers and route between them.
 #
-# Derived from the single-model recipe in agent-docs/cross-model-kv-transfer/
-# serve_model.sh (pinned Dynamo rev ac7b7513790ef1d619b46f805aea03c9f21200ba,
-# examples/backends/vllm/launch/agg_router.sh). Same prerequisites: Dynamo +
-# vLLM importable, etcd and nats up (`docker compose -f dev/docker-compose.yml
-# up -d` in the Dynamo clone), weights pulled.
+# Derived from Dynamo's examples/backends/vllm/launch/agg_router.sh at the pinned
+# rev ac7b7513790ef1d619b46f805aea03c9f21200ba. Prerequisites: run it in the
+# Dynamo venv (Dynamo + vLLM importable), etcd and nats up (`docker compose -f
+# dev/docker-compose.yml up -d` in the Dynamo clone), weights pulled. The README
+# (Part B) has the full from-scratch setup.
 #
 # Memory on a single 80 GB card is split by --gpu-memory-utilization, which
 # vLLM reads as a fraction of the *whole* card per worker. The defaults below
@@ -64,10 +64,14 @@ echo "=================================================================="
 python -m dynamo.frontend --router-mode kv --http-port "${HTTP_PORT}" &
 
 worker() {
-  local model="$1" mem="$2" kv_port="$3" sys_port="$4"
+  local role="$1" model="$2" mem="$3" kv_port="$4" sys_port="$5"
+  # Dynamo refuses a second model on an endpoint that already serves one, so
+  # each worker gets its own component; the shared namespace keeps both
+  # visible to the one frontend.
   DYN_SYSTEM_PORT="${sys_port}" \
   CUDA_VISIBLE_DEVICES="${GPU}" \
   python3 -m dynamo.vllm \
+    --endpoint "dyn://dynamo.${role}.generate" \
     --model "${model}" \
     --block-size "${BLOCK_SIZE}" \
     --tensor-parallel-size 1 \
@@ -80,8 +84,8 @@ worker() {
 
 # Start the larger model first so its allocation is not fragmented by the
 # smaller one's; wait for it to settle before the second claims its share.
-worker "${TARGET}" "${TARGET_MEM}" "${TARGET_KV_PORT}" "${TARGET_SYSTEM_PORT}"
+worker target "${TARGET}" "${TARGET_MEM}" "${TARGET_KV_PORT}" "${TARGET_SYSTEM_PORT}"
 sleep "${STAGGER_S:-90}"
-worker "${SOURCE}" "${SOURCE_MEM}" "${SOURCE_KV_PORT}" "${SOURCE_SYSTEM_PORT}"
+worker source "${SOURCE}" "${SOURCE_MEM}" "${SOURCE_KV_PORT}" "${SOURCE_SYSTEM_PORT}"
 
 wait -n
